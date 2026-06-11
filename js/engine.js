@@ -1,0 +1,249 @@
+/* Sidetrack — routing, prediction & suggestion engine. Pure functions, no DOM. */
+
+/* ---------------- graph ---------------- */
+
+function buildAdj(park) {
+  const adj = {};
+  for (const id of Object.keys(park.nodes)) adj[id] = [];
+  park.edges.forEach((e, i) => {
+    adj[e.a].push({ to: e.b, edge: e, idx: i });
+    adj[e.b].push({ to: e.a, edge: e, idx: i });
+  });
+  return adj;
+}
+
+function dijkstra(park, adj, src) {
+  const dist = {}, prev = {};
+  for (const id of Object.keys(park.nodes)) dist[id] = Infinity;
+  dist[src] = 0;
+  const open = new Set(Object.keys(park.nodes));
+  while (open.size) {
+    let u = null, best = Infinity;
+    for (const id of open) if (dist[id] < best) { best = dist[id]; u = id; }
+    if (u === null) break;
+    open.delete(u);
+    for (const { to, edge } of adj[u]) {
+      const d = dist[u] + edge.miles;
+      if (d < dist[to]) { dist[to] = d; prev[to] = u; }
+    }
+  }
+  return { dist, prev };
+}
+
+function pathFrom(prev, src, dst) {
+  if (src === dst) return [src];
+  if (prev[dst] === undefined) return null;
+  const path = [dst];
+  let cur = dst;
+  while (cur !== src) { cur = prev[cur]; path.push(cur); }
+  return path.reverse();
+}
+
+function edgeBetween(adj, a, b) {
+  return adj[a].find(n => n.to === b)?.edge ?? null;
+}
+
+function pathStats(park, adj, ids) {
+  let miles = 0, climb = 0, maxNav = 1;
+  for (let i = 0; i + 1 < ids.length; i++) {
+    const e = edgeBetween(adj, ids[i], ids[i + 1]);
+    miles += e.miles;
+    climb += e.climb;
+    maxNav = Math.max(maxNav, e.nav);
+  }
+  const junctions = Math.max(0, ids.length - 2);
+  return { miles, climb, junctions, maxNav };
+}
+
+/* ---------------- classification ---------------- */
+
+function classify(stats, poiOffTrail) {
+  const len = stats.miles <= 1.6 ? "short" : stats.miles <= 3.4 ? "medium" : "long";
+  const effortScore = stats.miles + stats.climb / 450;
+  const effort = effortScore < 2 ? "easy" : effortScore < 3.6 ? "moderate" : "hard";
+  let nav = stats.maxNav;
+  if (poiOffTrail) nav = Math.min(3, nav + 1);
+  if (stats.junctions >= 7) nav = Math.min(3, nav + 1);
+  return { len, effort, nav };
+}
+
+const LEN_LABEL = { short: "Short", medium: "Medium", long: "Long" };
+const EFFORT_LABEL = { easy: "Easy", moderate: "Moderate", hard: "Hard" };
+
+/* ---------------- preferences & history ---------------- */
+
+function emptyPrefs() { return { weights: {}, visited: {} }; }
+
+function prefScore(prefs, poi) {
+  let s = 0;
+  for (const t of poi.tags) s += prefs.weights[t] || 0;
+  const seen = prefs.visited[poi.id] || 0;
+  return s - seen * 2.5; // novelty: strongly prefer places you haven't been
+}
+
+function recordOutcome(prefs, poi, rating) {
+  // rating: 2 loved, 1 good, -1 meh
+  for (const t of poi.tags) {
+    prefs.weights[t] = (prefs.weights[t] || 0) + rating;
+  }
+  prefs.visited[poi.id] = (prefs.visited[poi.id] || 0) + 1;
+}
+
+function topTastes(prefs, n = 3) {
+  return Object.entries(prefs.weights)
+    .filter(([, w]) => w > 0)
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, n)
+    .map(([t]) => t);
+}
+
+/* ---------------- suggestions ---------------- */
+
+/**
+ * Build adventure candidates: from `fromId`, visit one POI, return to `carId`.
+ * Returns up to one best candidate per length bucket, scored by taste,
+ * novelty, and whether the POI lies along the hiker's predicted heading.
+ */
+function suggest(park, adj, fromId, carId, prefs, predictedIds) {
+  const fromD = dijkstra(park, adj, fromId);
+  const out = [];
+  for (const poi of park.pois) {
+    if (poi.node === fromId) continue;
+    const toPoi = pathFrom(fromD.prev, fromId, poi.node);
+    if (!toPoi) continue;
+    const poiD = dijkstra(park, adj, poi.node);
+    const toCar = pathFrom(poiD.prev, poi.node, carId);
+    if (!toCar) continue;
+
+    const ids = toPoi.concat(toCar.slice(1));
+    const stats = pathStats(park, adj, ids);
+    const cls = classify(stats, poi.offTrail);
+
+    let score = 10 + prefScore(prefs, poi);
+    if (predictedIds && predictedIds.has(poi.node)) score += 4; // "on your way"
+    if (poi.offTrail) score += 1; // the whole point of the app
+    score -= Math.abs(stats.miles - 2.2) * 0.4; // mild bias to middle distances
+
+    out.push({
+      poi, ids, stats, cls, score,
+      onYourWay: !!(predictedIds && predictedIds.has(poi.node)),
+    });
+  }
+
+  // one best option per length bucket, then fill with next-best overall
+  out.sort((a, b) => b.score - a.score);
+  const picked = [];
+  for (const len of ["short", "medium", "long"]) {
+    const c = out.find(o => o.cls.len === len && !picked.includes(o));
+    if (c) picked.push(c);
+  }
+  for (const o of out) {
+    if (picked.length >= 4) break;
+    if (!picked.includes(o)) picked.push(o);
+  }
+  picked.sort((a, b) => a.stats.miles - b.stats.miles);
+  return picked;
+}
+
+/* ---------------- position snapping ---------------- */
+
+function distToSegment(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  let t = lenSq ? ((px - ax) * dx + (py - ay) * dy) / lenSq : 0;
+  t = Math.max(0, Math.min(1, t));
+  const x = ax + t * dx, y = ay + t * dy;
+  return { d: Math.hypot(px - x, py - y), x, y, t };
+}
+
+/** Snap a map-coordinate point to the nearest trail edge. */
+function snapToTrail(park, x, y) {
+  let best = null;
+  for (const e of park.edges) {
+    const a = park.nodes[e.a], b = park.nodes[e.b];
+    const s = distToSegment(x, y, a.x, a.y, b.x, b.y);
+    if (!best || s.d < best.d) best = { ...s, edge: e };
+  }
+  return best;
+}
+
+function nearestNode(park, x, y) {
+  let best = null, bestD = Infinity;
+  for (const [id, n] of Object.entries(park.nodes)) {
+    const d = Math.hypot(n.x - x, n.y - y);
+    if (d < bestD) { bestD = d; best = id; }
+  }
+  return best;
+}
+
+/* ---------------- prediction ---------------- */
+
+/**
+ * Given the last few snapped node visits (most recent last), figure out
+ * which way the hiker is heading and collect node ids reachable within
+ * `horizonMiles` *without* going back the way they came.
+ */
+function predictAhead(park, adj, recentNodes, horizonMiles = 1.3) {
+  if (recentNodes.length < 2) return new Set();
+  const cur = recentNodes[recentNodes.length - 1];
+  const cameFrom = recentNodes[recentNodes.length - 2];
+  const reach = new Set();
+  const stack = [{ id: cur, from: cameFrom, left: horizonMiles }];
+  while (stack.length) {
+    const { id, from, left } = stack.pop();
+    for (const { to, edge } of adj[id]) {
+      if (to === from) continue; // don't predict a U-turn
+      if (edge.miles > left) continue;
+      if (!reach.has(to)) {
+        reach.add(to);
+        stack.push({ id: to, from: id, left: left - edge.miles });
+      }
+    }
+  }
+  return reach;
+}
+
+/* ---------------- live hints (warmer / colder) ---------------- */
+
+function hintFor(poi, hintIndex, distMilesNow, distMilesAtLastHint) {
+  const canned = poi.hints || [];
+  const seq = [];
+  if (canned[0]) seq.push({ kind: "canned", text: canned[0] });
+  seq.push({ kind: "trend" });
+  if (canned[1]) seq.push({ kind: "canned", text: canned[1] });
+  seq.push({ kind: "range" });
+  if (canned[2]) seq.push({ kind: "canned", text: canned[2] });
+
+  const step = seq[Math.min(hintIndex, seq.length - 1)];
+  if (step.kind === "canned") return step.text;
+  if (step.kind === "trend") {
+    if (distMilesAtLastHint == null) return "Keep moving, then ask again — I'll tell you if you're getting warmer.";
+    const delta = distMilesAtLastHint - distMilesNow;
+    if (delta > 0.02) return "Warmer. Noticeably warmer, actually.";
+    if (delta < -0.02) return "Colder. Whatever you just decided… reconsider.";
+    return "Lukewarm. You're circling it.";
+  }
+  // range
+  if (distMilesNow < 0.08) return "You're within a couple hundred yards. Eyes up, phone down.";
+  if (distMilesNow < 0.25) return "Less than a quarter mile as the crow flies. The crow is smug about it.";
+  if (distMilesNow < 0.6)  return "Somewhere under three-quarters of a mile. The right trail matters more than speed.";
+  return "Still a fair hike away. Trust the map, pick your route.";
+}
+
+/* ---------------- geo projection ---------------- */
+
+function geoToMap(park, lat, lng, W = 1000, H = 620) {
+  const g = park.geo;
+  const x = ((lng - g.lngMin) / (g.lngMax - g.lngMin)) * W;
+  const y = ((g.latMax - lat) / (g.latMax - g.latMin)) * H;
+  const inside = lat >= g.latMin && lat <= g.latMax && lng >= g.lngMin && lng <= g.lngMax;
+  return { x, y, inside };
+}
+
+if (typeof module !== "undefined") {
+  module.exports = {
+    buildAdj, dijkstra, pathFrom, edgeBetween, pathStats, classify,
+    LEN_LABEL, EFFORT_LABEL, emptyPrefs, prefScore, recordOutcome, topTastes,
+    suggest, snapToTrail, nearestNode, predictAhead, hintFor, geoToMap,
+  };
+}

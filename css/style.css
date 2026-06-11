@@ -1,0 +1,205 @@
+/* Sidetrack — warm paper-and-ink look to match the hand-drawn maps. */
+
+:root {
+  --paper: #f6efdc;
+  --paper-dark: #efe4c8;
+  --ink: #2b2b2b;
+  --brown: #7a5c3e;
+  --purple: #a626a6;
+  --green: #4d7c4a;
+  --hand: "Caveat", "Segoe Print", cursive;
+  --body: "Patrick Hand", "Comic Sans MS", cursive;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--body);
+  background: var(--paper-dark);
+  color: var(--ink);
+  font-size: 17px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--paper);
+  border-bottom: 2px solid var(--brown);
+}
+
+.brand h1 {
+  font-family: var(--hand);
+  font-size: 34px;
+  margin: 0;
+  line-height: 1;
+  color: var(--brown);
+}
+.brand p { margin: 0; font-size: 14px; color: #8a7a5e; }
+
+.tab {
+  font-family: var(--hand);
+  font-size: 20px;
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  padding: 4px 14px;
+  cursor: pointer;
+  color: var(--brown);
+}
+.tab.on { border-color: var(--brown); background: var(--paper-dark); }
+
+main { max-width: 980px; margin: 0 auto; padding: 10px 12px 40px; }
+
+.toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+select {
+  font-family: var(--body);
+  font-size: 16px;
+  padding: 6px 10px;
+  border: 2px solid var(--brown);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.mode { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.banner {
+  background: var(--paper);
+  border: 2px dashed var(--brown);
+  border-radius: 12px;
+  padding: 8px 14px;
+  margin-bottom: 8px;
+  min-height: 24px;
+  transition: background 0.3s;
+}
+.banner.highlight { background: #fff3b8; }
+
+.map-wrap {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(80, 60, 30, 0.25);
+}
+
+#map {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1000 / 620;
+  background: var(--paper);
+  touch-action: none;
+  cursor: crosshair;
+}
+
+/* map text (lives inside the SVG) */
+.trail-label { font-family: var(--hand); font-size: 17px; fill: #6b6b6b; }
+.map-title { font-family: var(--hand); font-size: 32px; font-weight: 700; fill: var(--brown); }
+.map-sub { font-family: var(--hand); font-size: 17px; fill: #8a7a5e; }
+.north-n { font-family: var(--hand); font-size: 20px; fill: var(--brown); }
+.parking-p { font-family: var(--hand); font-size: 17px; font-weight: 700; fill: var(--ink); }
+.control-num { font-family: var(--hand); font-size: 22px; font-weight: 700; fill: var(--purple); }
+.car-mark { font-size: 18px; }
+
+.you-core { fill: #d23f2e; stroke: #fff; stroke-width: 2; }
+.you-pulse {
+  fill: #d23f2e;
+  opacity: 0.25;
+  animation: pulse 1.8s ease-out infinite;
+  transform-origin: center;
+}
+@keyframes pulse {
+  0% { opacity: 0.35; r: 7; }
+  100% { opacity: 0; r: 18; }
+}
+
+.hint-box {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  background: rgba(43, 43, 43, 0.92);
+  color: var(--paper);
+  border-radius: 12px;
+  padding: 10px 14px;
+  display: none;
+  align-items: center;
+  gap: 12px;
+}
+.hint-box.show { display: flex; }
+.hint-box p { margin: 0; flex: 1; font-size: 18px; }
+
+.panel { margin-top: 12px; }
+.panel-bar { margin-bottom: 10px; }
+
+.card {
+  background: var(--paper);
+  border: 2px solid var(--brown);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  box-shadow: 2px 3px 0 rgba(122, 92, 62, 0.3);
+}
+.card h3 { margin: 0; font-family: var(--hand); font-size: 24px; color: var(--brown); }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.blurb { margin: 6px 0; }
+
+.badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+
+.chip {
+  font-size: 14px;
+  border: 1.5px solid var(--brown);
+  border-radius: 999px;
+  padding: 2px 10px;
+  background: var(--paper-dark);
+  white-space: nowrap;
+}
+.chip.way { background: #fff3b8; border-color: #c9a227; }
+.chip.off { background: #f3d9f3; border-color: var(--purple); }
+.chip.len-short { background: #ddeed8; }
+.chip.len-medium { background: #fdebc8; }
+.chip.len-long { background: #f6d3c4; }
+.chip.eff-easy { background: #ddeed8; }
+.chip.eff-moderate { background: #fdebc8; }
+.chip.eff-hard { background: #f6d3c4; }
+
+.card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+.btn {
+  font-family: var(--body);
+  font-size: 16px;
+  padding: 7px 14px;
+  border-radius: 10px;
+  border: 2px solid var(--brown);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+}
+.btn.primary { background: var(--green); border-color: var(--green); color: #fff; }
+.btn.primary:hover { filter: brightness(1.1); }
+.btn.ghost { background: transparent; }
+.btn.small { font-size: 14px; padding: 4px 10px; }
+.btn.wide { width: 100%; font-size: 18px; }
+.rate .btn { flex: 1; font-size: 17px; }
+
+.active-adventure { border-color: var(--purple); box-shadow: 2px 3px 0 rgba(166, 38, 166, 0.3); }
+.active-adventure h3 { color: var(--purple); }
+
+.muted { color: #8a7a5e; }
+.taste { font-size: 17px; }
+.history-item p { margin: 4px 0 0; }
+
+@media (max-width: 640px) {
+  body { font-size: 16px; }
+  .brand h1 { font-size: 28px; }
+  main { padding: 8px 8px 32px; }
+}
