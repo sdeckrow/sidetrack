@@ -201,6 +201,12 @@ function maybePredict() {
 
 /* ---------------- suggestions & adventures ---------------- */
 
+const PACE_MPH = 2; // unhurried hiking pace, poking-around time included
+
+function budgetMiles() {
+  return parseFloat($("#time-select").value) * PACE_MPH;
+}
+
 function suggestNow() {
   if (!state.park || !state.carId || !state.pos) {
     setBanner("Pick where you parked first — tap a P on the map.");
@@ -208,8 +214,20 @@ function suggestNow() {
   }
   const hereNode = nearestNode(state.park, state.pos.x, state.pos.y);
   const ahead = predictAhead(state.park, state.adj, state.recentNodes);
-  state.candidates = suggest(state.park, state.adj, hereNode, state.carId, state.prefs, ahead);
+  const budget = budgetMiles();
+  state.candidates = suggest(state.park, state.adj, hereNode, state.carId, state.prefs, ahead, budget);
+  state.overBudget = false;
+  if (!state.candidates.length && isFinite(budget)) {
+    // nothing fits the window — offer the closest overruns rather than nothing
+    state.candidates = suggest(state.park, state.adj, hereNode, state.carId, state.prefs, ahead, budget * 1.6);
+    state.overBudget = state.candidates.length > 0;
+  }
   renderPanel();
+  if (state.overBudget) {
+    setBanner("Nothing quite fits that time window from here — these run a little over.");
+  } else if (state.candidates.length) {
+    setBanner("Each course ends back on a trail — the faint dashed line is your eventual walk to the car.");
+  }
 }
 
 function startAdventure(cand) {
@@ -224,7 +242,10 @@ function startAdventure(cand) {
   state.showYou = false; // ranger mode: no live dot, that's the game
   drawAdventure();
   renderPanel();
-  setBanner(`Course set: find ${cand.poi.name}, then make your way back to the car. No dot, no compass — just you and the map. Ask for hints if you need them.`);
+  const finishName = state.park.nodes[cand.finishId].name;
+  setBanner(cand.endsAtCar
+    ? `Course set: find ${cand.poi.name}, then come out right at your car. No dot, no compass — just you and the map. Ask for hints if you need them.`
+    : `Course set: find ${cand.poi.name}, then come out at ${finishName} — from there it's ${cand.homeMiles.toFixed(1)} mi back to the car whenever you're ready. Ask for hints if you need them.`);
 }
 
 function drawAdventure() {
@@ -232,7 +253,13 @@ function drawAdventure() {
   const park = state.park;
   const poiNode = park.nodes[a.cand.poi.node];
   const start = { x: state.pos.x, y: state.pos.y };
-  state.map.drawCourse(start, [{ x: poiNode.x, y: poiNode.y, found: a.found }], park.nodes[state.carId]);
+  const homePts = a.cand.endsAtCar ? null : a.cand.homeIds.map(id => park.nodes[id]);
+  state.map.drawCourse(
+    start,
+    [{ x: poiNode.x, y: poiNode.y, found: a.found }],
+    park.nodes[a.cand.finishId],
+    homePts,
+  );
   updateYou();
 }
 
@@ -248,23 +275,26 @@ function checkArrivals() {
     a.found = true;
     drawAdventure();
     renderPanel();
-    setBanner(`Control found: ${a.cand.poi.name}! ${a.cand.poi.blurb} Now find your way back to the car.`, true);
-  } else if (a.found && !a.finished && distMilesTo(state.carId) < 0.05) {
+    const where = a.cand.endsAtCar ? "your car" : state.park.nodes[a.cand.finishId].name;
+    setBanner(`Control found: ${a.cand.poi.name}! ${a.cand.poi.blurb} Now find your way out to ${where} — that's the double circle.`, true);
+  } else if (a.found && !a.finished && distMilesTo(a.cand.finishId) < 0.05) {
     a.finished = true;
     renderPanel();
-    setBanner("Back at the car — course complete! How was it?", true);
+    setBanner(a.cand.endsAtCar
+      ? "Out at your car — course complete! How was it?"
+      : `Back on trail at ${state.park.nodes[a.cand.finishId].name} — course complete! Your car is ${a.cand.homeMiles.toFixed(1)} mi away along the dashed line, no rush. How was it?`, true);
   }
 }
 
 function giveHint() {
   const a = state.adventure;
   if (!a) return;
-  const target = a.found ? state.carId : a.cand.poi.node;
+  const target = a.found ? a.cand.finishId : a.cand.poi.node;
   const dNow = distMilesTo(target);
   let text;
   if (a.found) {
-    text = dNow < 0.1 ? "The car is close enough to hear the parking lot. Almost there."
-      : "Think about which trails you already know. The car hasn't moved; your confidence shouldn't either.";
+    text = dNow < 0.1 ? "The finish is close enough to smell. Almost there."
+      : "Work out which trail the double circle sits on, then find that trail. The finish hasn't moved; your confidence shouldn't either.";
   } else {
     text = hintFor(a.cand.poi, a.hintIndex, dNow, a.distAtLastHint);
     a.hintIndex++;
@@ -287,16 +317,21 @@ function finishAdventure(rating) {
     rating,
   });
   save();
+  const cand = a.cand;
   state.adventure = null;
   state.candidates = [];
   state.showYou = true;
   state.map.clearCourse();
+  if (!cand.endsAtCar) state.map.previewRoute(cand.homeIds); // leave the way home on the map
   updateYou();
   renderPanel();
   const taste = topTastes(state.prefs);
-  setBanner(taste.length
-    ? `Logged it. I'm noticing you like: ${taste.map(t => TAGS[t].toLowerCase()).join(", ")}. Next suggestions will lean that way.`
-    : "Logged it. A few more adventures and I'll start learning your taste.");
+  const learned = taste.length
+    ? `I'm noticing you like: ${taste.map(t => TAGS[t].toLowerCase()).join(", ")}. Next suggestions will lean that way.`
+    : "A few more adventures and I'll start learning your taste.";
+  setBanner(cand.endsAtCar
+    ? `Logged it. ${learned}`
+    : `Logged it — the highlighted route is your ${cand.homeMiles.toFixed(1)} mi walk back to the car. Or hit “Suggest adventures” and turn it into another one. ${learned}`);
 }
 
 function abandonAdventure() {
@@ -346,17 +381,22 @@ function renderPanel() {
   for (const c of state.candidates) {
     const card = document.createElement("div");
     card.className = "card";
+    const finishName = state.park.nodes[c.finishId].name;
     card.innerHTML = `
       <div class="card-head">
         <h3>${c.poi.name}</h3>
         ${c.onYourWay ? '<span class="chip way">on your way</span>' : ""}
       </div>
       <p class="blurb">${c.poi.blurb}</p>
+      <p class="finish-line">${c.endsAtCar
+        ? "Comes out right at your car."
+        : `Comes out at <b>${finishName}</b> — then ${c.homeMiles.toFixed(1)} mi back to the car when you're ready.`}</p>
       <div class="badges">
         <span class="chip len-${c.cls.len}">${LEN_LABEL[c.cls.len]} · ${c.stats.miles.toFixed(1)} mi</span>
         <span class="chip eff-${c.cls.effort}">${EFFORT_LABEL[c.cls.effort]} · ${Math.round(c.stats.climb)} ft</span>
         <span class="chip nav">Nav ${NAV_STARS(c.cls.nav)}</span>
-        ${c.poi.offTrail ? '<span class="chip off">off-trail finish</span>' : ""}
+        ${c.poi.offTrail ? '<span class="chip off">off-trail control</span>' : ""}
+        <span class="chip">${((c.stats.miles + c.homeMiles) / PACE_MPH * 60).toFixed(0)} min all-in</span>
       </div>
       <div class="card-actions">
         <button class="btn ghost preview">Peek route</button>
@@ -385,13 +425,18 @@ function renderAdventurePanel(panel) {
     card.querySelectorAll(".rate-btn").forEach(b =>
       b.addEventListener("click", () => finishAdventure(parseInt(b.dataset.r, 10))));
   } else {
+    const finishName = state.park.nodes[a.cand.finishId].name;
+    const finishLabel = a.cand.endsAtCar ? "your car" : finishName;
     card.innerHTML = `
-      <h3>${a.found ? "Leg 2 — back to the car" : `Control 1 — ${a.cand.poi.name}`}</h3>
+      <h3>${a.found ? `Leg 2 — out at ${finishLabel}` : `Control 1 — ${a.cand.poi.name}`}</h3>
       <p class="blurb">${a.found
-        ? "You found it. Now navigate home — the double circle is your car."
+        ? `You found it. Now navigate to the double circle${a.cand.endsAtCar
+            ? " — it's your car."
+            : ` at ${finishName}. The faint dashed line from there is your eventual walk home (${a.cand.homeMiles.toFixed(1)} mi).`}`
         : "Navigate to the circle on the map. Your position is hidden; that's the fun part."}</p>
       <div class="badges">
-        <span class="chip">${a.cand.stats.miles.toFixed(1)} mi total</span>
+        <span class="chip">${a.cand.stats.miles.toFixed(1)} mi course</span>
+        ${a.cand.endsAtCar ? "" : `<span class="chip">+${a.cand.homeMiles.toFixed(1)} mi home later</span>`}
         <span class="chip nav">Nav ${NAV_STARS(a.cand.cls.nav)}</span>
       </div>
       <div class="card-actions">
@@ -399,7 +444,7 @@ function renderAdventurePanel(panel) {
         <button class="btn ghost spoiler">${state.showYou ? "Hide me" : "Show me (spoiler)"}</button>
         <button class="btn ghost abandon">Abandon</button>
         ${state.mode === "demo" && !a.found ? '<button class="btn ghost found-demo">I found it</button>' : ""}
-        ${state.mode === "demo" && a.found ? '<button class="btn ghost found-demo">I\'m at the car</button>' : ""}
+        ${state.mode === "demo" && a.found ? '<button class="btn ghost found-demo">I\'m at the finish</button>' : ""}
       </div>`;
     card.querySelector(".hint").addEventListener("click", giveHint);
     card.querySelector(".spoiler").addEventListener("click", () => {
@@ -411,7 +456,7 @@ function renderAdventurePanel(panel) {
     const fd = card.querySelector(".found-demo");
     if (fd) fd.addEventListener("click", () => {
       // demo shortcut: declare arrival (honor system, like real orienteering)
-      const target = a.found ? state.carId : a.cand.poi.node;
+      const target = a.found ? a.cand.finishId : a.cand.poi.node;
       if (distMilesTo(target) < 0.12) {
         const n = state.park.nodes[target];
         state.pos = { x: n.x, y: n.y };

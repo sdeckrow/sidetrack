@@ -139,7 +139,16 @@ select {
 .hint-box p { margin: 0; flex: 1; font-size: 18px; }
 
 .panel { margin-top: 12px; }
-.panel-bar { margin-bottom: 10px; }
+.panel-bar {
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.panel-bar .btn.wide { flex: 1; width: auto; min-width: 200px; }
+.time-pick { font-family: var(--hand); font-size: 20px; color: var(--brown); }
+.finish-line { margin: 4px 0; font-size: 16px; color: #5a4a32; }
 
 .card {
   background: var(--paper);

@@ -45,6 +45,13 @@
 
     <div class="panel">
       <div class="panel-bar">
+        <label class="time-pick" for="time-select">How long are you out for?</label>
+        <select id="time-select" aria-label="How long do you want to be out?">
+          <option value="0.75">~45 minutes</option>
+          <option value="1.5" selected>~1½ hours</option>
+          <option value="3">~3 hours</option>
+          <option value="99">All day</option>
+        </select>
         <button id="suggest-btn" class="btn primary wide">Suggest adventures</button>
       </div>
       <div id="cards"></div>

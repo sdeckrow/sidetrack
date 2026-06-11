@@ -192,12 +192,22 @@ class ParkMap {
 
   /**
    * Draw start triangle at `startPt`, control circles at `controls`
-   * ({x, y, found}), double circle at car node, connected by purple legs.
+   * ({x, y, found}), double circle at `finishNode` (a trail node — not
+   * necessarily the car), connected by purple legs. `homePts`, if given,
+   * is the eventual walk back to the car, drawn as a faint dashed leg so
+   * the way home is always on the map without being part of the course.
    */
-  drawCourse(startPt, controls, carNode) {
+  drawCourse(startPt, controls, finishNode, homePts) {
     this.clearCourse();
     const P = "#a626a6";
-    const pts = [startPt, ...controls, { x: carNode.x, y: carNode.y }];
+    if (homePts && homePts.length > 1) {
+      el("path", {
+        d: wavyPath(homePts.map(p => [p.x, p.y])),
+        fill: "none", stroke: P, "stroke-width": 2,
+        "stroke-dasharray": "2 8", "stroke-linecap": "round", opacity: 0.45,
+      }, this.gCourse);
+    }
+    const pts = [startPt, ...controls, { x: finishNode.x, y: finishNode.y }];
     // legs (gapped at the symbols just by drawing under thin symbols — fine at this style)
     for (let i = 0; i + 1 < pts.length; i++) {
       el("line", {
@@ -221,8 +231,8 @@ class ParkMap {
       }
     });
     // finish: double circle
-    el("circle", { cx: carNode.x, cy: carNode.y, r: 14, fill: "none", stroke: P, "stroke-width": 3 }, this.gCourse);
-    el("circle", { cx: carNode.x, cy: carNode.y, r: 20, fill: "none", stroke: P, "stroke-width": 3 }, this.gCourse);
+    el("circle", { cx: finishNode.x, cy: finishNode.y, r: 14, fill: "none", stroke: P, "stroke-width": 3 }, this.gCourse);
+    el("circle", { cx: finishNode.x, cy: finishNode.y, r: 20, fill: "none", stroke: P, "stroke-width": 3 }, this.gCourse);
   }
 
   /* Faint preview of a candidate route (when browsing cards). */

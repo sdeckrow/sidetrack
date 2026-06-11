@@ -100,32 +100,78 @@ function topTastes(prefs, n = 3) {
 /* ---------------- suggestions ---------------- */
 
 /**
- * Build adventure candidates: from `fromId`, visit one POI, return to `carId`.
- * Returns up to one best candidate per length bucket, scored by taste,
- * novelty, and whether the POI lies along the hiker's predicted heading.
+ * Pick the best place to end a course after visiting `poi`: some trail
+ * node elsewhere in the park (occasionally the car itself), chosen so the
+ * course plus the remaining walk back to the car fits `budgetMiles`.
  */
-function suggest(park, adj, fromId, carId, prefs, predictedIds) {
+function pickFinish(park, poiD, carD, poi, outboundIds, courseSoFar, budgetMiles) {
+  let best = null;
+  for (const finishId of Object.keys(park.nodes)) {
+    if (finishId === poi.node) continue; // a course has to go somewhere
+    const onward = poiD.dist[finishId];
+    const home = carD.dist[finishId];
+    if (!isFinite(onward) || !isFinite(home)) continue;
+    const total = courseSoFar + onward + home;
+    if (total > budgetMiles) continue;
+
+    let s = 0;
+    // explore: ending somewhere you didn't walk out through
+    if (!outboundIds.includes(finishId)) s += 2.5;
+    // genuinely new ground beats doubling straight back
+    if (finishId !== outboundIds[0]) s += 1;
+    // use most of the time you said you had — but don't stretch to the brim
+    if (isFinite(budgetMiles)) {
+      const use = total / budgetMiles;
+      s += 3 * Math.max(0, 1 - Math.abs(use - 0.8) * 2.2);
+    }
+    // a real onward leg after the find, not a token few steps
+    s += Math.min(onward, 1.5);
+    // ...but don't strand them needlessly far from the car either
+    s -= home * 0.2;
+
+    if (!best || s > best.s) best = { finishId, onward, home, s };
+  }
+  return best;
+}
+
+/**
+ * Build adventure candidates: from `fromId`, visit one POI, then come out
+ * on a trail somewhere in the park — sometimes at the car, usually not —
+ * keeping course + walk-home inside `budgetMiles`. Returns up to one best
+ * candidate per length bucket, scored by taste, novelty, and whether the
+ * POI lies along the hiker's predicted heading.
+ */
+function suggest(park, adj, fromId, carId, prefs, predictedIds, budgetMiles = Infinity) {
   const fromD = dijkstra(park, adj, fromId);
+  const carD = dijkstra(park, adj, carId); // walk-home distance from anywhere
   const out = [];
   for (const poi of park.pois) {
     if (poi.node === fromId) continue;
     const toPoi = pathFrom(fromD.prev, fromId, poi.node);
     if (!toPoi) continue;
     const poiD = dijkstra(park, adj, poi.node);
-    const toCar = pathFrom(poiD.prev, poi.node, carId);
-    if (!toCar) continue;
+    const courseSoFar = fromD.dist[poi.node];
 
-    const ids = toPoi.concat(toCar.slice(1));
+    const fin = pickFinish(park, poiD, carD, poi, toPoi, courseSoFar, budgetMiles);
+    if (!fin) continue;
+
+    const onwardIds = pathFrom(poiD.prev, poi.node, fin.finishId);
+    const ids = toPoi.concat(onwardIds.slice(1));
+    const homeIds = pathFrom(carD.prev, carId, fin.finishId).reverse(); // finish -> car
     const stats = pathStats(park, adj, ids);
     const cls = classify(stats, poi.offTrail);
 
     let score = 10 + prefScore(prefs, poi);
     if (predictedIds && predictedIds.has(poi.node)) score += 4; // "on your way"
     if (poi.offTrail) score += 1; // the whole point of the app
-    score -= Math.abs(stats.miles - 2.2) * 0.4; // mild bias to middle distances
+    score += fin.s * 0.5;
 
     out.push({
       poi, ids, stats, cls, score,
+      finishId: fin.finishId,
+      homeIds,
+      homeMiles: fin.home,
+      endsAtCar: fin.finishId === carId,
       onYourWay: !!(predictedIds && predictedIds.has(poi.node)),
     });
   }
