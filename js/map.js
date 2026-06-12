@@ -297,13 +297,15 @@ class ParkMap {
       const tip = el("title", {}, g);
       tip.textContent = `${f.t} · ${f.e} ft · q ${f.q} · ${(f.dT / this.park.pxPerMile).toFixed(2)} mi to trail`;
     }
-    // legend
-    const lg = el("g", { transform: `translate(${this.W - 168}, ${this.H - 132})` }, this.gFeatures);
-    el("rect", { x: 0, y: 0, width: 156, height: 120, fill: "#fbfbf7", opacity: 0.92, stroke: "#999", "stroke-width": 0.7, rx: 3 }, lg);
+    // legend (only the feature types actually present)
+    const present = new Set(features.map((f) => f.t));
     const rows = [
       ["hill", "hilltop"], ["saddle", "saddle"], ["reentrant", "reentrant axis"],
       ["spur", "spur axis"], ["streambend", "stream bend"], ["streamjct", "stream junction"],
-    ];
+    ].filter(([t]) => present.has(t));
+    const lgH = rows.length * 17 + 10;
+    const lg = el("g", { transform: `translate(${this.W - 168}, ${this.H - lgH - 12})` }, this.gFeatures);
+    el("rect", { x: 0, y: 0, width: 156, height: lgH, fill: "#fbfbf7", opacity: 0.92, stroke: "#999", "stroke-width": 0.7, rx: 3 }, lg);
     rows.forEach(([t, label], i) => {
       const y = 17 + i * 17;
       const s = STYLE[t];

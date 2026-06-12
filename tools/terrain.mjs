@@ -18,7 +18,15 @@
 
 export function extractFeatures(gridInfo, opts) {
   const { grid, W, H } = gridInfo;
-  const { cellM, toMap, boundaryFlat, streams, trailPts, caps = {} } = opts;
+  const { cellM, toMap, boundaryFlat, streams, trailPts, caps = {}, tuning = {} } = opts;
+  const TU = {
+    hillReliefFt: 18,   // a hilltop must drop this much in EVERY direction (~100 m ring)
+    saddleAmpFt: 13,    // both sides must rise this much (~32 m ring)
+    axisDepthFt: 10,    // reentrant/spur cross-section depth, both sides
+    axisMinLenM: 70,    // shorter than this isn't a feature, it's a dent
+    axisCatchM2: 1600,  // min catchment area feeding a reentrant head
+    ...tuning,
+  };
 
   /* ---- axis-analysis grid: ~2.5 m cells, whatever the input res ----
    * Resolution-independent behavior: flow tracing on sub-2 m lidar braids
@@ -71,13 +79,13 @@ export function extractFeatures(gridInfo, opts) {
       let maxRing = -Infinity;
       for (const [ox, oy] of RING) maxRing = Math.max(maxRing, Sd[i + oy * Wd + ox]);
       const relief = v - maxRing; // EVERY direction must drop, not just one
-      if (relief >= 18) hills.push({ x: x * k, y: y * k, q: relief, e: v });
+      if (relief >= TU.hillReliefFt) hills.push({ x: x * k, y: y * k, q: relief, e: v });
     }
   }
 
   const saddles = [];
   const SR = ringOffsets(8, 24); // ~32 m ring: real saddles, not dips
-  for (let y = 9; y < Hd - 9; y++) {
+  for (let y = 9; (caps.saddle ?? 25) > 0 && y < Hd - 9; y++) {
     for (let x = 9; x < Wd - 9; x++) {
       const i = y * Wd + x, v = Sd[i];
       let trans = 0, prev = 0, ampUp = 0, ampDn = 0;
@@ -90,7 +98,7 @@ export function extractFeatures(gridInfo, opts) {
         if (j > 0 && sgn !== prev && sgn !== 0 && prev !== 0) trans++;
         prev = sgn || prev;
       }
-      if (trans === 4 && Math.min(ampUp, ampDn) >= 13) {
+      if (trans === 4 && Math.min(ampUp, ampDn) >= TU.saddleAmpFt) {
         saddles.push({ x: x * k, y: y * k, q: Math.min(ampUp, ampDn), e: v });
       }
     }
@@ -112,9 +120,9 @@ export function extractFeatures(gridInfo, opts) {
   /* ---- reentrant & spur AXES (metric thresholds, axis grid) ---- */
   const axisShared = {
     W: WA, H: HA, S: SA, slope, cellM: cellMA,
-    A1: Math.round(1600 / (cellMA * cellMA)),   // ≥ ~0.16 ha catchment
+    A1: Math.round(TU.axisCatchM2 / (cellMA * cellMA)),
     A2: Math.round(130000 / (cellMA * cellMA)), // ≤ ~13 ha — beyond that it's a valley
-    slopeMin: 4, depthMin: 10,
+    slopeMin: 4, depthMin: TU.axisDepthFt, minLenM: TU.axisMinLenM,
   };
   const reentAxes = dedupAxes(traceAndValidate({ ...axisShared, dir: dirDown, flow: accum, inverted: false }), cellMA);
   const spurAxes = dedupAxes(traceAndValidate({ ...axisShared, dir: dirUp, flow: ridge, inverted: true }), cellMA);
@@ -167,7 +175,7 @@ export function extractFeatures(gridInfo, opts) {
 
 /* ---------------- axis tracing + cross-section validation ---------------- */
 
-function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, slopeMin, depthMin }) {
+function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, slopeMin, depthMin, minLenM = 70 }) {
   const mask = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) {
     if (flow[i] >= A1 && flow[i] <= A2 && slope[i] >= slopeMin) mask[i] = 1;
@@ -232,7 +240,7 @@ function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, 
     const depths = passing.map((x) => x.depth).sort((x, y) => x - y);
     const median = depths[(depths.length / 2) | 0];
     const cells = pts.slice(stations[a].s, stations[b].s + 1);
-    if (cells.length * cellM < 70) continue; // under ~70 m isn't a feature, it's a dent
+    if (cells.length * cellM < minLenM) continue; // too short to navigate by
     out.push({ cells, depth: median, lenCells: cells.length });
   }
   return out;

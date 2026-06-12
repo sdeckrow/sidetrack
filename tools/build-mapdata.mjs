@@ -26,6 +26,15 @@ const Z = 15;
 const TILE = 256;
 const MAP_W = 1000;
 
+/* Feature-detection tuning — the knobs Steve turns. */
+const FEATURE_TUNING = {
+  hillReliefFt: 14,   // hilltop must drop this much in every direction (~100 m ring)
+  axisDepthFt: 8,     // reentrant/spur cross-section depth, both sides
+  axisMinLenM: 55,    // minimum validated axis length
+  axisCatchM2: 1000,  // min catchment feeding a reentrant head
+};
+const FEATURE_CAPS = { saddle: 0 }; // saddles off for now (Steve 2026-06-12)
+
 /* ---------------- geo helpers ---------------- */
 
 const R_MI = 3958.8;
@@ -424,6 +433,8 @@ for (const parkId of ["redmountain", "oakmountain"]) {
     boundaryFlat: boundary,
     streams,
     trailPts: edges.flatMap((e) => e.pts),
+    tuning: FEATURE_TUNING,
+    caps: FEATURE_CAPS,
   });
   const fCounts = {};
   for (const f of features) fCounts[f.t] = (fCounts[f.t] || 0) + 1;
