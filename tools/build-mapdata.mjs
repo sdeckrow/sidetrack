@@ -55,6 +55,24 @@ const px2lat = (py) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * py) / (2 ** Z * 
 
 /* ---------------- polyline utils ---------------- */
 
+/* RDP-simplify that survives closed rings: a loop's first==last point
+ * makes plain RDP see a zero-length baseline and collapse the whole
+ * ring — split closed lines at their farthest point first. */
+function simplifyLine(pts, eps) {
+  const n = pts.length;
+  if (n < 4) return pts;
+  const closed = Math.hypot(pts[0][0] - pts[n - 1][0], pts[0][1] - pts[n - 1][1]) < 1e-6;
+  if (!closed) return rdp(pts, eps);
+  let iFar = 1, dFar = 0;
+  for (let i = 1; i < n - 1; i++) {
+    const d = Math.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]);
+    if (d > dFar) { dFar = d; iFar = i; }
+  }
+  const a = rdp(pts.slice(0, iFar + 1), eps);
+  const b = rdp(pts.slice(iFar), eps);
+  return a.slice(0, -1).concat(b);
+}
+
 function rdp(pts, eps) {
   if (pts.length <= 2) return pts;
   const [ax, ay] = pts[0], [bx, by] = pts[pts.length - 1];
@@ -113,7 +131,7 @@ function buildContours(gridInfo, project, intervalFt, indexEvery) {
         if (v11 >= level) idx |= 4;
         if (v01 >= level) idx |= 8;
         if (idx === 0 || idx === 15) continue;
-        const t = (a, b) => (level - a) / (b - a);
+        const t = (a, b) => (a === b ? 0.5 : Math.max(0.001, Math.min(0.999, (level - a) / (b - a))));
         const top = [x + t(v00, v10), y], right = [x + 1, y + t(v10, v11)];
         const bot = [x + t(v01, v11), y + 1], left = [x, y + t(v00, v01)];
         const E = {
@@ -126,8 +144,9 @@ function buildContours(gridInfo, project, intervalFt, indexEvery) {
         for (const s of E) segs.push(s);
       }
     }
-    // chain segments into polylines
-    const key = (p) => `${Math.round(p[0] * 1e4)},${Math.round(p[1] * 1e4)}`;
+    // chain segments into polylines — tolerant endpoint matching so a
+    // contour never breaks mid-slope (they only end at the grid edge)
+    const key = (p) => `${Math.round(p[0] * 100)},${Math.round(p[1] * 100)}`;
     const byEnd = new Map();
     segs.forEach((s, i) => {
       for (const p of [s[0], s[1]]) {
@@ -152,14 +171,15 @@ function buildContours(gridInfo, project, intervalFt, indexEvery) {
           dir ? line.push(nxt) : line.unshift(nxt);
         }
       }
-      if (line.length < 5) continue;
-      // cell coords → lat/lng → map coords, smooth, simplify
+      if (line.length < 3) continue;
+      // cell coords → lat/lng → map coords; gentle simplify only — the
+      // renderer draws these as curves, so keep the shape points
       let pts = line.map(([cx, cy]) => {
         const ll = toLL(cx, cy);
         const m = project(ll.lat, ll.lng);
         return [m.x, m.y];
-      });
-      pts = rdp(chaikin(pts), 0.9);
+      }).filter((p) => isFinite(p[0]) && isFinite(p[1]));
+      pts = simplifyLine(chaikin(pts), 0.25);
       if (pts.length < 3) continue;
       if (level % (intervalFt * indexEvery) === 0) index.push({ e: level, pts: flat(pts) });
       else minor.push(flat(pts));

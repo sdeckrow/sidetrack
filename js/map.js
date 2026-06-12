@@ -15,11 +15,25 @@ function el(name, attrs = {}, parent = null) {
   return e;
 }
 
-/* flat [x1,y1,x2,y2,…] → SVG path d */
+/* flat [x1,y1,x2,y2,…] → SVG path d (straight segments) */
 function flatPath(pts, close = false) {
   let d = `M ${pts[0]} ${pts[1]}`;
   for (let i = 2; i < pts.length; i += 2) d += ` L ${pts[i]} ${pts[i + 1]}`;
   return close ? d + " Z" : d;
+}
+
+/* flat pts → smooth curve: quadratic beziers through segment midpoints.
+ * For terrain lines (contours, reentrant/spur axes) — no corners. */
+function curvePath(pts) {
+  const n = pts.length;
+  if (n < 6) return flatPath(pts);
+  let d = `M ${pts[0]} ${pts[1]} L ${(pts[0] + pts[2]) / 2} ${(pts[1] + pts[3]) / 2}`;
+  for (let i = 2; i + 3 < n; i += 2) {
+    const mx = (pts[i] + pts[i + 2]) / 2, my = (pts[i + 1] + pts[i + 3]) / 2;
+    d += ` Q ${pts[i]} ${pts[i + 1]} ${mx} ${my}`;
+  }
+  d += ` L ${pts[n - 2]} ${pts[n - 1]}`;
+  return d;
 }
 
 const COLORS = {
@@ -104,13 +118,13 @@ class ParkMap {
     if (!c) return;
     for (const line of c.minor) {
       el("path", {
-        d: flatPath(line), fill: "none", stroke: COLORS.contour,
+        d: curvePath(line), fill: "none", stroke: COLORS.contour,
         "stroke-width": 0.8, opacity: 0.85, "vector-effect": "non-scaling-stroke",
       }, this.gContours);
     }
     for (const line of c.index) {
       el("path", {
-        d: flatPath(line.pts), fill: "none", stroke: COLORS.contourIndex,
+        d: curvePath(line.pts), fill: "none", stroke: COLORS.contourIndex,
         "stroke-width": 1.6, opacity: 0.9, "vector-effect": "non-scaling-stroke",
       }, this.gContours);
     }
@@ -261,9 +275,9 @@ class ParkMap {
       const g = el("g", { opacity: far ? 0.35 : 0.95 }, this.gFeatures);
       const r = 3;
       if (s.shape === "axis") {
-        // axis polyline: thin, constant screen width at any zoom
+        // axis curve: thin, constant screen width at any zoom
         el("path", {
-          d: flatPath(f.pts), fill: "none", stroke: s.color,
+          d: curvePath(f.pts), fill: "none", stroke: s.color,
           "stroke-width": Math.min(2, 0.8 + f.depth / 30), "stroke-linecap": "round",
           "vector-effect": "non-scaling-stroke",
         }, g);

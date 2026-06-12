@@ -140,7 +140,8 @@ export function extractFeatures(gridInfo, opts) {
       .map((a) => {
         // axis-grid coords → full-grid coords → map
         const mapPts = a.cells.map(([cx, cy]) => { const m = toMap(cx * kA, cy * kA); return [m.x, m.y]; });
-        const simp = rdp(mapPts, 1.0);
+        const simp = rdp(mapPts, 0.35); // keep the shape — drawn as curves
+
         const mid = a.cells[Math.floor(a.cells.length / 2)];
         const mm = toMap(mid[0] * kA, mid[1] * kA);
         return {
