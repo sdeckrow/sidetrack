@@ -202,15 +202,35 @@ function distToSegment(px, py, ax, ay, bx, by) {
   return { d: Math.hypot(px - x, py - y), x, y, t };
 }
 
-/** Snap a map-coordinate point to the nearest trail edge. */
+/** Snap a map-coordinate point to the nearest trail edge,
+ *  following the edge's real polyline geometry. */
 function snapToTrail(park, x, y) {
   let best = null;
   for (const e of park.edges) {
-    const a = park.nodes[e.a], b = park.nodes[e.b];
-    const s = distToSegment(x, y, a.x, a.y, b.x, b.y);
-    if (!best || s.d < best.d) best = { ...s, edge: e };
+    const p = e.pts;
+    for (let i = 0; i + 3 < p.length; i += 2) {
+      const s = distToSegment(x, y, p[i], p[i + 1], p[i + 2], p[i + 3]);
+      if (!best || s.d < best.d) best = { ...s, edge: e };
+    }
   }
   return best;
+}
+
+/** Real trail geometry for a node-id route, as flat [x1,y1,…] points. */
+function routePts(park, adj, ids) {
+  const out = [];
+  for (let i = 0; i + 1 < ids.length; i++) {
+    const e = edgeBetween(adj, ids[i], ids[i + 1]);
+    if (!e) continue;
+    let pts = e.pts;
+    if (e.a !== ids[i]) { // edge stored b→a relative to our travel: reverse
+      pts = [];
+      for (let j = e.pts.length - 2; j >= 0; j -= 2) pts.push(e.pts[j], e.pts[j + 1]);
+    }
+    const start = out.length ? 2 : 0; // skip duplicated junction point
+    for (let j = start; j < pts.length; j++) out.push(pts[j]);
+  }
+  return out;
 }
 
 function nearestNode(park, x, y) {
@@ -278,10 +298,10 @@ function hintFor(poi, hintIndex, distMilesNow, distMilesAtLastHint) {
 
 /* ---------------- geo projection ---------------- */
 
-function geoToMap(park, lat, lng, W = 1000, H = 620) {
+function geoToMap(park, lat, lng) {
   const g = park.geo;
-  const x = ((lng - g.lngMin) / (g.lngMax - g.lngMin)) * W;
-  const y = ((g.latMax - lat) / (g.latMax - g.latMin)) * H;
+  const x = ((lng - g.lngMin) / (g.lngMax - g.lngMin)) * park.mapW;
+  const y = ((g.latMax - lat) / (g.latMax - g.latMin)) * park.mapH;
   const inside = lat >= g.latMin && lat <= g.latMax && lng >= g.lngMin && lng <= g.lngMax;
   return { x, y, inside };
 }
@@ -290,6 +310,6 @@ if (typeof module !== "undefined") {
   module.exports = {
     buildAdj, dijkstra, pathFrom, edgeBetween, pathStats, classify,
     LEN_LABEL, EFFORT_LABEL, emptyPrefs, prefScore, recordOutcome, topTastes,
-    suggest, snapToTrail, nearestNode, predictAhead, hintFor, geoToMap,
+    suggest, snapToTrail, routePts, nearestNode, predictAhead, hintFor, geoToMap,
   };
 }

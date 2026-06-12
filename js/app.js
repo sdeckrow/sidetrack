@@ -92,8 +92,14 @@ function walkTo(pt) {
   const d = dijkstra(park, adj, hereNode);
   const ids = pathFrom(d.prev, hereNode, targetNode);
   if (!ids) return;
+  // follow the real trail geometry, flagging graph nodes as we pass them
   const waypoints = [{ x: state.pos.x, y: state.pos.y, node: null }];
-  for (const id of ids) waypoints.push({ x: park.nodes[id].x, y: park.nodes[id].y, node: id });
+  waypoints.push({ x: park.nodes[ids[0]].x, y: park.nodes[ids[0]].y, node: ids[0] });
+  for (let i = 0; i + 1 < ids.length; i++) {
+    const pts = routePts(park, adj, [ids[i], ids[i + 1]]);
+    for (let j = 2; j < pts.length - 2; j += 2) waypoints.push({ x: pts[j], y: pts[j + 1], node: null });
+    waypoints.push({ x: park.nodes[ids[i + 1]].x, y: park.nodes[ids[i + 1]].y, node: ids[i + 1] });
+  }
   startWalking(waypoints);
 }
 
@@ -251,27 +257,28 @@ function startAdventure(cand) {
 function drawAdventure() {
   const a = state.adventure;
   const park = state.park;
-  const poiNode = park.nodes[a.cand.poi.node];
+  const poi = a.cand.poi; // control circle at the POI's real location
   const start = { x: state.pos.x, y: state.pos.y };
-  const homePts = a.cand.endsAtCar ? null : a.cand.homeIds.map(id => park.nodes[id]);
+  const homePts = a.cand.endsAtCar ? null : routePts(park, state.adj, a.cand.homeIds);
   state.map.drawCourse(
     start,
-    [{ x: poiNode.x, y: poiNode.y, found: a.found }],
+    [{ x: poi.x, y: poi.y, found: a.found }],
     park.nodes[a.cand.finishId],
     homePts,
   );
   updateYou();
 }
 
-function distMilesTo(nodeId) {
-  const n = state.park.nodes[nodeId];
-  return Math.hypot(n.x - state.pos.x, n.y - state.pos.y) / state.park.pxPerMile;
+/* distance from current position, in miles; target is a node id or the POI itself */
+function distMilesTo(target) {
+  const t = typeof target === "string" ? state.park.nodes[target] : target;
+  return Math.hypot(t.x - state.pos.x, t.y - state.pos.y) / state.park.pxPerMile;
 }
 
 function checkArrivals() {
   const a = state.adventure;
   if (!a) return;
-  if (!a.found && distMilesTo(a.cand.poi.node) < 0.05) {
+  if (!a.found && distMilesTo(a.cand.poi) < 0.05) {
     a.found = true;
     drawAdventure();
     renderPanel();
@@ -289,7 +296,7 @@ function checkArrivals() {
 function giveHint() {
   const a = state.adventure;
   if (!a) return;
-  const target = a.found ? a.cand.finishId : a.cand.poi.node;
+  const target = a.found ? a.cand.finishId : a.cand.poi;
   const dNow = distMilesTo(target);
   let text;
   if (a.found) {
@@ -322,7 +329,7 @@ function finishAdventure(rating) {
   state.candidates = [];
   state.showYou = true;
   state.map.clearCourse();
-  if (!cand.endsAtCar) state.map.previewRoute(cand.homeIds); // leave the way home on the map
+  if (!cand.endsAtCar) state.map.previewRoute(routePts(state.park, state.adj, cand.homeIds)); // leave the way home on the map
   updateYou();
   renderPanel();
   const taste = topTastes(state.prefs);
@@ -402,7 +409,7 @@ function renderPanel() {
         <button class="btn ghost preview">Peek route</button>
         <button class="btn primary go">Make it an adventure</button>
       </div>`;
-    card.querySelector(".preview").addEventListener("click", () => state.map.previewRoute(c.ids));
+    card.querySelector(".preview").addEventListener("click", () => state.map.previewRoute(routePts(state.park, state.adj, c.ids)));
     card.querySelector(".go").addEventListener("click", () => startAdventure(c));
     panel.appendChild(card);
   }
@@ -456,10 +463,10 @@ function renderAdventurePanel(panel) {
     const fd = card.querySelector(".found-demo");
     if (fd) fd.addEventListener("click", () => {
       // demo shortcut: declare arrival (honor system, like real orienteering)
-      const target = a.found ? a.cand.finishId : a.cand.poi.node;
+      const target = a.found ? a.cand.finishId : a.cand.poi;
       if (distMilesTo(target) < 0.12) {
-        const n = state.park.nodes[target];
-        state.pos = { x: n.x, y: n.y };
+        const t = typeof target === "string" ? state.park.nodes[target] : target;
+        state.pos = { x: t.x, y: t.y };
         checkArrivals();
       } else {
         setBanner("Hmm — you don't seem close enough to punch that control. Keep looking.");

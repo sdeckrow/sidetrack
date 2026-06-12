@@ -60,18 +60,33 @@ insecure pages.
 
 | File | What it does |
 |---|---|
-| `js/data.js` | Both parks as trail graphs (nodes/edges with miles, climb, nav rating), POIs with progressive hints, decorative terrain |
+| `js/data.js` | **Generated — do not edit.** Both parks built from real survey data: OSM trail geometry (every bend, real names), USGS contours, water, roads, parking, park boundary; POIs with progressive hints anchored to real coordinates |
 | `js/engine.js` | Dijkstra routing, route classification, heading prediction (no U-turns), suggestion scoring, preference learning, hint logic, GPS→map projection |
-| `js/map.js` | Hand-drawn orienteering map renderer: SVG with turbulence-displaced "wobbly ink" strokes, contour rings, ISOM-ish colors, purple course overlay, pan/zoom |
+| `js/map.js` | Orienteering map renderer: ISOM-ish colors (brown contours, blue water, yellow open land, black dashed trails), purple course overlay, scale bar, pan/zoom |
 | `js/app.js` | UI state machine, demo walking, GPS tracking, history |
+
+## Map data
+
+The maps are built from real survey data:
+
+- **Trails, water, roads, parking, boundaries** — © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors (ODbL)
+- **Contours** — USGS 3DEP elevation via the AWS Terrain Tiles open dataset
+
+To rebuild (e.g. after OSM improves the parks, or to edit POIs in
+`tools/park-content.mjs`):
+
+```sh
+node tools/fetch-osm.mjs        # trail/water/parking geometry → tools/raw/
+node tools/fetch-elevation.mjs  # elevation tiles → tools/raw/tiles/
+node tools/build-mapdata.mjs    # → js/data.js
+```
 
 ## Honest caveats
 
-- **Trail geometry is hand-modeled and approximate.** Real trail names and
-  real places, but stylized layout — it's an orienteering sketch map, not
-  survey data. Don't use it as your only navigation in the backcountry;
+- OSM trail data is community-surveyed: excellent in these parks, but not
+  gospel. Don't use this as your only navigation in the backcountry;
   carry the park's official map too.
-- GPS alignment uses a simple linear lat/lng projection; expect
-  rough, not perfect, registration on-site.
+- GPS alignment uses an equirectangular projection over each park's
+  bounding box — good registration at park scale, not survey-grade.
 - Off-trail suggestions assume park rules allow it where marked — check
   signage; some areas (mine portals especially) are sealed for good reason.

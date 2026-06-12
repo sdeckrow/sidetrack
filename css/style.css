@@ -95,14 +95,16 @@ select {
   display: block;
   width: 100%;
   height: auto;
-  aspect-ratio: 1000 / 620;
+  max-height: 78vh;
   background: var(--paper);
   touch-action: none;
   cursor: crosshair;
 }
 
 /* map text (lives inside the SVG) */
-.trail-label { font-family: var(--hand); font-size: 17px; fill: #6b6b6b; }
+.trail-label { font-family: var(--hand); font-size: 11px; fill: #555; paint-order: stroke; stroke: #fffdf6; stroke-width: 2.5px; }
+.lake-label { font-family: var(--hand); font-size: 12px; font-style: italic; fill: #2a6f93; }
+.scale-text { font-family: var(--hand); font-size: 12px; fill: #333; }
 .map-title { font-family: var(--hand); font-size: 32px; font-weight: 700; fill: var(--brown); }
 .map-sub { font-family: var(--hand); font-size: 17px; fill: #8a7a5e; }
 .north-n { font-family: var(--hand); font-size: 20px; fill: var(--brown); }
