@@ -373,9 +373,17 @@ class ParkMap {
   /* ---- live position ---- */
 
   setYou(pt, visible) {
-    if (!pt) { this.youDot.setAttribute("visibility", "hidden"); return; }
-    this.youDot.setAttribute("transform", `translate(${pt.x},${pt.y})`);
-    this.youDot.setAttribute("visibility", visible ? "visible" : "hidden");
+    this.youState = { pt, visible };
+    this._renderYou();
+  }
+
+  /* the pulse dot keeps a constant screen size at any zoom */
+  _renderYou() {
+    const s = this.youState;
+    if (!s || !s.pt) { this.youDot.setAttribute("visibility", "hidden"); return; }
+    const k = this._mapPerScreenPx();
+    this.youDot.setAttribute("transform", `translate(${s.pt.x},${s.pt.y}) scale(${k})`);
+    this.youDot.setAttribute("visibility", s.visible ? "visible" : "hidden");
   }
 
   /* ---- pan / zoom / tap ---- */
@@ -385,6 +393,7 @@ class ParkMap {
     this.svg.setAttribute("viewBox", `${v.x} ${v.y} ${v.w} ${v.h}`);
     this._updateTiles();
     this._renderCourse(); // course symbols keep constant screen size
+    this._renderYou();
   }
 
   _clientToMap(cx, cy) {

@@ -316,13 +316,32 @@ function handrailAdj(park) {
   const h = park.handrails;
   const n = h.nodes.length / 2;
   const adj = Array.from({ length: n }, () => []);
+  park._hkind = new Map(); // (a,b) -> edge kind, for route-quality scoring
+  park._hlen = new Map();
   for (let i = 0; i + 3 < h.edges.length; i += 4) {
     const [a, b, kind, m] = [h.edges[i], h.edges[i + 1], h.edges[i + 2], h.edges[i + 3]];
     adj[a].push([b, m, kind]);
     adj[b].push([a, m, kind]);
+    park._hkind.set(a * 100000 + b, kind);
+    park._hlen.set(a * 100000 + b, m);
   }
   park._hadj = adj;
   return adj;
+}
+
+/* fraction of a leg's meters spent following reentrant axes */
+function legReentrantFrac(park, prev, from, to) {
+  let total = 0, reent = 0, v = to, guard = 0;
+  while (v !== from && v >= 0 && guard++ < 20000) {
+    const u = prev[v];
+    if (u < 0) break;
+    const kind = park._hkind.get(u * 100000 + v) ?? park._hkind.get(v * 100000 + u);
+    const len = park._hlen.get(u * 100000 + v) ?? park._hlen.get(v * 100000 + u) ?? 0;
+    total += len;
+    if (kind === 2) reent += len;
+    v = u;
+  }
+  return total ? reent / total : 0;
 }
 
 /* Dijkstra with integer-meter buckets (Dial's algorithm), cut at maxM. */
@@ -394,15 +413,17 @@ function easyCourses(park, pos, nControls) {
     return { error: `You need to be within ${EASY.startSnapM} m of a trail to start an easy course.` };
   }
 
-  const usable = park.features.filter((f) => f.hn !== undefined && FEATURE_LABEL[f.t]);
+  // this version: reentrants only — you follow a reentrant, then another
+  // reentrant brings you back out to a path
+  const usable = park.features.filter((f) => f.hn !== undefined && f.t === "reentrant");
 
   // beam search over control sequences
-  let beams = [{ at: start.node, controls: [], score: 0, usedT: new Set(), usedF: new Set() }];
+  let beams = [{ at: start.node, controls: [], score: 0, usedF: new Set() }];
   for (let leg = 0; leg < nControls; leg++) {
     const legMax = leg === 0 ? EASY.firstLegMaxM : EASY.legMaxM;
     const next = [];
     for (const b of beams) {
-      const { dist } = hrDijkstra(park, b.at, legMax + 30);
+      const { dist, prev } = hrDijkstra(park, b.at, legMax + 30);
       for (const f of usable) {
         if (b.usedF.has(f)) continue;
         const dM = dist[f.hn];
@@ -410,20 +431,19 @@ function easyCourses(park, pos, nControls) {
         // controls shouldn't bunch up
         if (b.controls.some((c) => Math.hypot(c.f.x - f.x, c.f.y - f.y) / pxPerM < 60)) continue;
         let s = b.score;
-        s -= Math.abs(dM - EASY.legIdealM) * 0.15;          // leg length near ideal
-        s += Math.min(20, (f.depth || f.q || 5));            // prominent feature
-        s += b.usedT.has(f.t) ? 0 : 9;                       // variety bonus
+        s -= Math.abs(dM - EASY.legIdealM) * 0.15;            // leg length near ideal
+        s += Math.min(20, (f.depth || f.q || 5));              // prominent feature
+        s += 14 * legReentrantFrac(park, prev, b.at, f.hn);    // FOLLOW the reentrant, don't trail-walk
         next.push({
           at: f.hn, score: s,
           controls: [...b.controls, { f, legM: Math.round(dM) }],
-          usedT: new Set([...b.usedT, f.t]),
           usedF: new Set([...b.usedF, f]),
         });
       }
     }
     next.sort((a, c) => c.score - a.score);
     beams = next.slice(0, 6);
-    if (!beams.length) return { error: "No feature-rich ground within easy reach from here — hike a little farther in and try again." };
+    if (!beams.length) return { error: "No reentrant country within easy reach from here — hike a little farther in and try again." };
   }
 
   // exit leg: nearest trail node, ideally not where you started

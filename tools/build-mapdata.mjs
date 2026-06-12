@@ -352,8 +352,9 @@ function buildHandrails(edges, streams, features, pxPerMile) {
   for (const e of edges) lines.push({ kind: 0, pts: e.pts });
   for (const s of streams) lines.push({ kind: 1, pts: s });
   features.forEach((f, fi) => {
+    // this version routes on reentrants only — spurs stay on the map
+    // as features but are not handrails (Steve 2026-06-12)
     if (f.t === "reentrant") lines.push({ kind: 2, pts: f.pts, fi });
-    if (f.t === "spur") lines.push({ kind: 3, pts: f.pts, fi });
   });
 
   const nx = [], ny = [], nodeLine = [], nodeKind = [], lineEnds = [];

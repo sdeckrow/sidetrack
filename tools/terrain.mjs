@@ -241,10 +241,21 @@ function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, 
     const depths = passing.map((x) => x.depth).sort((x, y) => x - y);
     const median = depths[(depths.length / 2) | 0];
     // hysteresis: once confirmed, follow the feature's projection outward
-    // at half depth — captures the shallow head and the tapering nose
-    const depthLow = depthMin * 0.5;
-    while (a > 0 && stations[a - 1].depth >= depthLow) a--;
-    while (b < stations.length - 1 && stations[b + 1].depth >= depthLow) b++;
+    // at a much lower gate, riding through single shallow stations —
+    // captures the full shallow head and the tapering nose
+    const depthLow = depthMin * 0.35;
+    const extend = (i, dir) => {
+      let gap = 0;
+      while (i + dir >= 0 && i + dir < stations.length) {
+        if (stations[i + dir].depth >= depthLow) { i += dir; gap = 0; }
+        else if (gap < 1 && i + 2 * dir >= 0 && i + 2 * dir < stations.length &&
+                 stations[i + 2 * dir].depth >= depthLow) { i += 2 * dir; gap++; }
+        else break;
+      }
+      return i;
+    };
+    a = extend(a, -1);
+    b = extend(b, 1);
     const cells = pts.slice(stations[a].s, stations[b].s + 1);
     if (cells.length * cellM < minLenM) continue; // too short to navigate by
     out.push({ cells, depth: median, lenCells: cells.length });

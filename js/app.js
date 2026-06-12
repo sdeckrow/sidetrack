@@ -244,7 +244,7 @@ function suggestNow() {
   renderPanel();
   setBanner(n < want
     ? `A ${want}-control course doesn't fit from right here — best the terrain offers is ${n}. Hike on a bit for more options.`
-    : "Pick a course — every control is a real terrain feature, and every leg follows a line you can read: trail, stream, reentrant, spur.");
+    : "Pick a course — every control is a reentrant, and every leg follows a line you can read: trail, stream, or the reentrant itself.");
 }
 
 function startAdventure(cand) {
