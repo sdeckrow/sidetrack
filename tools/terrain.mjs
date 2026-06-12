@@ -187,6 +187,14 @@ function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, 
   const claimed = new Int32Array(W * H);
   const paths = [];
   const minPath = Math.round(50 / cellM), maxPath = Math.round(1500 / cellM);
+  // geometric extension past the strict mask: the crease usually keeps
+  // going (shallow head above, gentle runout below, often right down to
+  // a trail) — follow it with relaxed gates and let the cross-section
+  // stations decide how much survives
+  const extendSlope = 1.5; // degrees — runout can be gentle
+  const upCap = Math.round(140 / cellM), downCap = Math.round(220 / cellM);
+  const nbOff = [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
+
   for (let i = 0; i < W * H; i++) {
     if (!mask[i] || hasParent[i] || claimed[i]) continue;
     const path = [];
@@ -197,7 +205,44 @@ function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, 
       path.push(cur);
       cur = dir[cur];
     }
-    if (cur >= 0 && claimed[cur] && claimed[cur] !== id) path.push(cur); // join the junction
+    let joined = false;
+    if (cur >= 0 && claimed[cur] && claimed[cur] !== id) { path.push(cur); joined = true; }
+    if (path.length < Math.max(4, minPath / 2)) continue; // hopeless scrap
+
+    // upstream: climb the main stem into the shallow head
+    cur = path[0];
+    const head = [];
+    while (head.length < upCap) {
+      let best = -1, bestF = 0;
+      const cx = cur % W, cy = (cur / W) | 0;
+      if (cx < 2 || cx >= W - 2 || cy < 2 || cy >= H - 2) break;
+      for (const off of nbOff) {
+        const n = cur + off;
+        if (dir[n] === cur && !claimed[n] && slope[n] >= extendSlope && flow[n] > bestF) {
+          bestF = flow[n]; best = n;
+        }
+      }
+      if (best < 0) break;
+      claimed[best] = id;
+      head.push(best);
+      cur = best;
+    }
+    if (head.length) path.unshift(...head.reverse());
+
+    // downstream: follow the runout toward the valley/trail
+    cur = path[path.length - 1];
+    let added = 0;
+    while (!joined && added < downCap) {
+      const nxt = dir[cur];
+      if (nxt < 0 || claimed[nxt] || slope[nxt] < extendSlope || flow[nxt] > A2 * 4) break;
+      const cx = nxt % W, cy = (nxt / W) | 0;
+      if (cx < 2 || cx >= W - 2 || cy < 2 || cy >= H - 2) break;
+      claimed[nxt] = id;
+      path.push(nxt);
+      cur = nxt;
+      added++;
+    }
+
     if (path.length >= minPath) paths.push(path);
   }
 
