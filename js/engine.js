@@ -296,6 +296,175 @@ function hintFor(poi, hintIndex, distMilesNow, distMilesAtLastHint) {
   return "Still a fair hike away. Trust the map, pick your route.";
 }
 
+/* ---------------- easy course generation ----------------
+ * Courses are guided walks over the handrail network: trails, streams,
+ * reentrant axes, spur crests, stitched into one graph at build time.
+ * Easy rules: start on a trail near the hiker, ~100 m legs that follow
+ * handrails, each control a distinct detected feature, finish on trail.
+ */
+
+const EASY = {
+  startSnapM: 80,     // hiker must be this close to a trail to start
+  firstLegMaxM: 350,  // walking in along the trail before the attack is fine
+  legMinM: 60, legMaxM: 240, legIdealM: 120,
+  finishMinM: 30, finishMaxM: 300,
+  punchM: 30,         // arrival radius at a control
+};
+
+function handrailAdj(park) {
+  if (park._hadj) return park._hadj;
+  const h = park.handrails;
+  const n = h.nodes.length / 2;
+  const adj = Array.from({ length: n }, () => []);
+  for (let i = 0; i + 3 < h.edges.length; i += 4) {
+    const [a, b, kind, m] = [h.edges[i], h.edges[i + 1], h.edges[i + 2], h.edges[i + 3]];
+    adj[a].push([b, m, kind]);
+    adj[b].push([a, m, kind]);
+  }
+  park._hadj = adj;
+  return adj;
+}
+
+/* Dijkstra with integer-meter buckets (Dial's algorithm), cut at maxM. */
+function hrDijkstra(park, src, maxM) {
+  const adj = handrailAdj(park);
+  const n = adj.length;
+  const dist = new Float32Array(n).fill(Infinity);
+  const prev = new Int32Array(n).fill(-1);
+  const buckets = Array.from({ length: maxM + 1 }, () => []);
+  dist[src] = 0;
+  buckets[0].push(src);
+  for (let d = 0; d <= maxM; d++) {
+    for (const u of buckets[d]) {
+      if (dist[u] < d) continue;
+      for (const [v, m, kind] of adj[u]) {
+        void kind;
+        const nd = d + m;
+        if (nd <= maxM && nd < dist[v]) {
+          dist[v] = nd;
+          prev[v] = u;
+          buckets[nd].push(v);
+        }
+      }
+    }
+  }
+  return { dist, prev };
+}
+
+function hrNode(park, i) {
+  return { x: park.handrails.nodes[i * 2], y: park.handrails.nodes[i * 2 + 1] };
+}
+
+/* Nearest handrail node of a given kind (0=trail) to a map point. */
+function nearestHrNode(park, x, y, kindFilter = null) {
+  const h = park.handrails;
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < h.nodeKind.length; i++) {
+    if (kindFilter !== null && h.nodeKind[i] !== kindFilter) continue;
+    const d = Math.hypot(h.nodes[i * 2] - x, h.nodes[i * 2 + 1] - y);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return { node: best, distM: bestD / (park.pxPerMile / 1609.34) };
+}
+
+const FEATURE_LABEL = {
+  hill: (f) => `Hilltop · ${Math.round(f.q)} ft relief`,
+  reentrant: (f) => `Reentrant · ${f.depth} ft deep, ${f.len} m long`,
+  spur: (f) => `Spur · drops ${f.depth} ft each side`,
+  streambend: () => "Stream bend",
+  streamjct: () => "Stream junction",
+};
+
+const FEATURE_HINT = {
+  hill: "Up is the only instruction. Stop when everything else is down.",
+  reentrant: "Stay on your handrail until the ground folds into a small valley — stand in its crease.",
+  spur: "The hillside sticks a finger out. Walk the knuckle, not the webbing.",
+  streambend: "Water is your handrail. The control is where it changes its mind.",
+  streamjct: "Follow the water until it meets more water.",
+};
+
+/**
+ * Generate up to 3 easy courses from `pos` (map coords): nControls
+ * distinct features ~100 m apart along handrails, then out to a trail.
+ */
+function easyCourses(park, pos, nControls) {
+  const pxPerM = park.pxPerMile / 1609.34;
+  const start = nearestHrNode(park, pos.x, pos.y, 0); // kind 0 = trail
+  if (start.node < 0 || start.distM > EASY.startSnapM) {
+    return { error: `You need to be within ${EASY.startSnapM} m of a trail to start an easy course.` };
+  }
+
+  const usable = park.features.filter((f) => f.hn !== undefined && FEATURE_LABEL[f.t]);
+
+  // beam search over control sequences
+  let beams = [{ at: start.node, controls: [], score: 0, usedT: new Set(), usedF: new Set() }];
+  for (let leg = 0; leg < nControls; leg++) {
+    const legMax = leg === 0 ? EASY.firstLegMaxM : EASY.legMaxM;
+    const next = [];
+    for (const b of beams) {
+      const { dist } = hrDijkstra(park, b.at, legMax + 30);
+      for (const f of usable) {
+        if (b.usedF.has(f)) continue;
+        const dM = dist[f.hn];
+        if (!isFinite(dM) || dM < EASY.legMinM || dM > legMax) continue;
+        // controls shouldn't bunch up
+        if (b.controls.some((c) => Math.hypot(c.f.x - f.x, c.f.y - f.y) / pxPerM < 60)) continue;
+        let s = b.score;
+        s -= Math.abs(dM - EASY.legIdealM) * 0.15;          // leg length near ideal
+        s += Math.min(20, (f.depth || f.q || 5));            // prominent feature
+        s += b.usedT.has(f.t) ? 0 : 9;                       // variety bonus
+        next.push({
+          at: f.hn, score: s,
+          controls: [...b.controls, { f, legM: Math.round(dM) }],
+          usedT: new Set([...b.usedT, f.t]),
+          usedF: new Set([...b.usedF, f]),
+        });
+      }
+    }
+    next.sort((a, c) => c.score - a.score);
+    beams = next.slice(0, 6);
+    if (!beams.length) return { error: "No feature-rich ground within easy reach from here — hike a little farther in and try again." };
+  }
+
+  // exit leg: nearest trail node, ideally not where you started
+  const courses = [];
+  for (const b of beams) {
+    const { dist } = hrDijkstra(park, b.at, EASY.finishMaxM);
+    let fin = -1, finScore = -Infinity;
+    for (let i = 0; i < park.handrails.nodeKind.length; i++) {
+      if (park.handrails.nodeKind[i] !== 0) continue;
+      const dM = dist[i];
+      if (!isFinite(dM) || dM < EASY.finishMinM || dM > EASY.finishMaxM) continue;
+      const p = hrNode(park, i);
+      let s = -Math.abs(dM - 120) * 0.1;
+      s += Math.min(25, Math.hypot(p.x - pos.x, p.y - pos.y) / pxPerM * 0.08); // new ground
+      if (s > finScore) { finScore = s; fin = i; }
+    }
+    if (fin < 0) continue;
+    const finishLegM = Math.round(dist[fin]);
+    courses.push({
+      kind: "easy",
+      startNode: start.node, startPt: hrNode(park, start.node),
+      controls: b.controls.map((c) => ({ ...c, found: false })),
+      finishNode: fin, finishPt: hrNode(park, fin),
+      finishLegM,
+      totalM: b.controls.reduce((s, c) => s + c.legM, 0) + finishLegM,
+      score: b.score + finScore,
+    });
+  }
+  courses.sort((a, b) => b.score - a.score);
+  // de-dup courses sharing the same first control
+  const seen = new Set(), out = [];
+  for (const c of courses) {
+    const k = c.controls[0].f.x + ":" + c.controls[0].f.y;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(c);
+    if (out.length >= 3) break;
+  }
+  return { courses: out };
+}
+
 /* ---------------- geo projection ---------------- */
 
 function geoToMap(park, lat, lng) {
@@ -311,5 +480,6 @@ if (typeof module !== "undefined") {
     buildAdj, dijkstra, pathFrom, edgeBetween, pathStats, classify,
     LEN_LABEL, EFFORT_LABEL, emptyPrefs, prefScore, recordOutcome, topTastes,
     suggest, snapToTrail, routePts, nearestNode, predictAhead, hintFor, geoToMap,
+    easyCourses, nearestHrNode, hrDijkstra, hrNode, FEATURE_LABEL, FEATURE_HINT, EASY,
   };
 }

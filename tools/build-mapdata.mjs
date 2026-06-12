@@ -336,6 +336,119 @@ function buildGraph(elements, boundaryGeom, dem, project) {
   return { nodes, edges };
 }
 
+/* ---------------- handrail network ----------------
+ * One routable graph of every followable line feature: trails, streams,
+ * reentrant axes, spur crests. Lines are resampled to ~12 m nodes and
+ * stitched together wherever two different lines pass within ~14 m.
+ * The easy-course generator walks this graph at runtime. */
+
+const HANDRAIL_KINDS = ["trail", "stream", "reentrant", "spur"];
+
+function buildHandrails(edges, streams, features, pxPerMile) {
+  const pxPerM = pxPerMile / 1609.34;
+  const stepPx = 12 * pxPerM, tolPx = 30 * pxPerM, approachPx = 60 * pxPerM;
+
+  const lines = [];
+  for (const e of edges) lines.push({ kind: 0, pts: e.pts });
+  for (const s of streams) lines.push({ kind: 1, pts: s });
+  features.forEach((f, fi) => {
+    if (f.t === "reentrant") lines.push({ kind: 2, pts: f.pts, fi });
+    if (f.t === "spur") lines.push({ kind: 3, pts: f.pts, fi });
+  });
+
+  const nx = [], ny = [], nodeLine = [], nodeKind = [], lineEnds = [];
+  const hedges = []; // [a, b, kind, meters]
+  for (let li = 0; li < lines.length; li++) {
+    const { kind, pts } = lines[li];
+    let prevNode = -1, acc = 0;
+    for (let i = 0; i + 1 < pts.length; i += 2) {
+      const isLast = i + 3 >= pts.length;
+      if (prevNode >= 0 && acc < stepPx && !isLast) {
+        acc += Math.hypot(pts[i + 2] - pts[i], pts[i + 3] - pts[i + 1]);
+        continue;
+      }
+      const id = nx.length;
+      nx.push(pts[i]); ny.push(pts[i + 1]); nodeLine.push(li); nodeKind.push(kind);
+      if (prevNode >= 0) {
+        const d = Math.hypot(nx[id] - nx[prevNode], ny[id] - ny[prevNode]) / pxPerM;
+        hedges.push([prevNode, id, kind, Math.round(d)]);
+      }
+      prevNode = id; acc = 0;
+      if (!isLast) acc = Math.hypot(pts[i + 2] - pts[i], pts[i + 3] - pts[i + 1]);
+    }
+    // remember axis endpoints — natural attack points needing approach links
+    if (lines[li].kind >= 2 && prevNode >= 0) {
+      lineEnds.push(prevNode);
+      for (let i = nx.length - 1; i >= 0; i--) {
+        if (nodeLine[i] !== li) break;
+        if (i === 0 || nodeLine[i - 1] !== li) { lineEnds.push(i); break; }
+      }
+    }
+  }
+
+  // stitch different lines together where they nearly touch
+  const cell = Math.max(2, tolPx * 2);
+  const buckets = new Map();
+  for (let i = 0; i < nx.length; i++) {
+    const k = `${(nx[i] / cell) | 0},${(ny[i] / cell) | 0}`;
+    if (!buckets.has(k)) buckets.set(k, []);
+    buckets.get(k).push(i);
+  }
+  const linked = new Set();
+  let connectors = 0;
+  for (let i = 0; i < nx.length; i++) {
+    const cx = (nx[i] / cell) | 0, cy = (ny[i] / cell) | 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        for (const j of buckets.get(`${cx + dx},${cy + dy}`) || []) {
+          if (j <= i || nodeLine[j] === nodeLine[i]) continue;
+          const d = Math.hypot(nx[j] - nx[i], ny[j] - ny[i]);
+          if (d > tolPx) continue;
+          const lk = `${nodeLine[i]}:${nodeLine[j]}:${(nx[i] / (tolPx * 4)) | 0}:${(ny[i] / (tolPx * 4)) | 0}`;
+          if (linked.has(lk)) continue; // one stitch per line pair per neighborhood
+          linked.add(lk);
+          hedges.push([i, j, 4, Math.max(1, Math.round(d / pxPerM))]);
+          connectors++;
+        }
+      }
+    }
+  }
+
+  // anchor point features (hills, stream bends…) to the network
+  for (const f of features) {
+    let best = -1, bestD = 40 * pxPerM; // within 40 m or not anchorable
+    for (let i = 0; i < nx.length; i++) {
+      const d = Math.hypot(nx[i] - f.x, ny[i] - f.y);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best >= 0) f.hn = best;
+  }
+
+  // approach links: an axis endpoint reaches the nearest other line
+  // within ~60 m — the short obvious hop from the trail to the feature
+  let approaches = 0;
+  for (const end of lineEnds) {
+    let best = -1, bestD = approachPx;
+    for (let j = 0; j < nx.length; j++) {
+      if (nodeLine[j] === nodeLine[end]) continue;
+      const d = Math.hypot(nx[j] - nx[end], ny[j] - ny[end]);
+      if (d < bestD) { bestD = d; best = j; }
+    }
+    if (best >= 0 && bestD > tolPx) { // within tol already handled by stitching
+      hedges.push([end, best, 4, Math.max(1, Math.round(bestD / pxPerM))]);
+      approaches++;
+    }
+  }
+
+  console.log(`handrails: ${nx.length} nodes, ${hedges.length} edges (${connectors} stitches, ${approaches} approaches)`);
+  return {
+    kinds: HANDRAIL_KINDS,
+    nodes: nx.flatMap((x, i) => [Math.round(x * 10) / 10, Math.round(ny[i] * 10) / 10]),
+    nodeKind,
+    edges: hedges.flat(),
+  };
+}
+
 /* ---------------- main ---------------- */
 
 const out = {};
@@ -440,6 +553,9 @@ for (const parkId of ["redmountain", "oakmountain"]) {
   for (const f of features) fCounts[f.t] = (fCounts[f.t] || 0) + 1;
   console.log(`features: ${features.length}`, fCounts);
 
+  /* handrail network for course generation (annotates features with .hn) */
+  const handrails = buildHandrails(edges, streams, features, pxPerMile);
+
   /* POIs: resolve anchors to real coords + nearest graph node */
   const adjEdges = edges;
   const pois = [];
@@ -516,7 +632,7 @@ for (const parkId of ["redmountain", "oakmountain"]) {
     geo: bbox, tiles, contourInterval: interval,
     contours: { minor: contours.minor, index: contours.index },
     boundary, water, streams, dams, parkingLots,
-    nodes, edges, pois, lakeLabels, features,
+    nodes, edges, pois, lakeLabels, features, handrails,
   };
 }
 

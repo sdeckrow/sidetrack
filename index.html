@@ -45,14 +45,13 @@
 
     <div class="panel">
       <div class="panel-bar">
-        <label class="time-pick" for="time-select">How long are you out for?</label>
-        <select id="time-select" aria-label="How long do you want to be out?">
-          <option value="0.75">~45 minutes</option>
-          <option value="1.5" selected>~1½ hours</option>
-          <option value="3">~3 hours</option>
-          <option value="99">All day</option>
+        <label class="time-pick" for="controls-select">Easy course — how many controls?</label>
+        <select id="controls-select" aria-label="How many controls on your course?">
+          <option value="1">1 control</option>
+          <option value="2" selected>2 controls</option>
+          <option value="3">3 controls</option>
         </select>
-        <button id="suggest-btn" class="btn primary wide">Suggest adventures</button>
+        <button id="suggest-btn" class="btn primary wide">Suggest sidetracks</button>
       </div>
       <div id="cards"></div>
     </div>

@@ -217,12 +217,10 @@ function maybePredict() {
   }
 }
 
-/* ---------------- suggestions & adventures ---------------- */
+/* ---------------- easy courses & adventures ---------------- */
 
-const PACE_MPH = 2; // unhurried hiking pace, poking-around time included
-
-function budgetMiles() {
-  return parseFloat($("#time-select").value) * PACE_MPH;
+function controlCount() {
+  return parseInt($("#controls-select").value, 10);
 }
 
 function suggestNow() {
@@ -230,29 +228,30 @@ function suggestNow() {
     setBanner("Pick where you parked first — tap a P on the map.");
     return;
   }
-  const hereNode = nearestNode(state.park, state.pos.x, state.pos.y);
-  const ahead = predictAhead(state.park, state.adj, state.recentNodes);
-  const budget = budgetMiles();
-  state.candidates = suggest(state.park, state.adj, hereNode, state.carId, state.prefs, ahead, budget);
-  state.overBudget = false;
-  if (!state.candidates.length && isFinite(budget)) {
-    // nothing fits the window — offer the closest overruns rather than nothing
-    state.candidates = suggest(state.park, state.adj, hereNode, state.carId, state.prefs, ahead, budget * 1.6);
-    state.overBudget = state.candidates.length > 0;
+  const want = controlCount();
+  let n = want, r = easyCourses(state.park, state.pos, n);
+  while (r.error && n > 1) {
+    n--;
+    r = easyCourses(state.park, state.pos, n);
   }
+  if (r.error) {
+    state.candidates = [];
+    renderPanel();
+    setBanner(r.error);
+    return;
+  }
+  state.candidates = r.courses;
   renderPanel();
-  if (state.overBudget) {
-    setBanner("Nothing quite fits that time window from here — these run a little over.");
-  } else if (state.candidates.length) {
-    setBanner("Each course ends back on a trail — the faint dashed line is your eventual walk to the car.");
-  }
+  setBanner(n < want
+    ? `A ${want}-control course doesn't fit from right here — best the terrain offers is ${n}. Hike on a bit for more options.`
+    : "Pick a course — every control is a real terrain feature, and every leg follows a line you can read: trail, stream, reentrant, spur.");
 }
 
 function startAdventure(cand) {
   state.adventure = {
     cand,
     startedAt: Date.now(),
-    found: false,
+    found: 0,             // controls punched so far
     hintIndex: 0,
     distAtLastHint: null,
     finished: false,
@@ -260,26 +259,31 @@ function startAdventure(cand) {
   state.showYou = false; // ranger mode: no live dot, that's the game
   drawAdventure();
   renderPanel();
-  const finishName = state.park.nodes[cand.finishId].name;
-  setBanner(cand.endsAtCar
-    ? `Course set: find ${cand.poi.name}, then come out right at your car. No dot, no compass — just you and the map. Ask for hints if you need them.`
-    : `Course set: find ${cand.poi.name}, then come out at ${finishName} — from there it's ${cand.homeMiles.toFixed(1)} mi back to the car whenever you're ready. Ask for hints if you need them.`);
+  const n = cand.controls.length;
+  setBanner(`Course set: ${n} control${n > 1 ? "s" : ""}, ~${cand.totalM} m. Start at the triangle, punch the circles in order, come out at the double circle on the trail. No dot, no compass — just you and the terrain.`);
 }
 
 function drawAdventure() {
   const a = state.adventure;
-  const park = state.park;
-  const poi = a.cand.poi; // control circle at the POI's real location
-  const start = { x: state.pos.x, y: state.pos.y };
-  const homePts = a.cand.endsAtCar ? null : routePts(park, state.adj, a.cand.homeIds);
+  const c = a.cand;
   state.map.drawCourse(
-    start,
-    [{ x: poi.x, y: poi.y, found: a.found }],
-    park.nodes[a.cand.finishId],
-    homePts,
+    c.startPt,
+    c.controls.map((ctl, i) => ({ x: ctl.f.x, y: ctl.f.y, found: i < a.found })),
+    c.finishPt,
+    null,
   );
   updateYou();
 }
+
+/* the thing the hiker is currently navigating to */
+function currentTarget() {
+  const a = state.adventure;
+  if (!a) return null;
+  const c = a.cand;
+  return a.found < c.controls.length ? c.controls[a.found].f : c.finishPt;
+}
+
+const PUNCH_MILES = 30 / 1609.34; // arrival radius at a control
 
 /* distance from current position, in miles; target is a node id or the POI itself */
 function distMilesTo(target) {
@@ -289,33 +293,42 @@ function distMilesTo(target) {
 
 function checkArrivals() {
   const a = state.adventure;
-  if (!a) return;
-  if (!a.found && distMilesTo(a.cand.poi) < 0.05) {
-    a.found = true;
-    drawAdventure();
-    renderPanel();
-    const where = a.cand.endsAtCar ? "your car" : state.park.nodes[a.cand.finishId].name;
-    setBanner(`Control found: ${a.cand.poi.name}! ${a.cand.poi.blurb} Now find your way out to ${where} — that's the double circle.`, true);
-  } else if (a.found && !a.finished && distMilesTo(a.cand.finishId) < 0.05) {
+  if (!a || a.finished) return;
+  const c = a.cand;
+  if (a.found < c.controls.length) {
+    const ctl = c.controls[a.found].f;
+    if (distMilesTo(ctl) < PUNCH_MILES) {
+      a.found++;
+      a.hintIndex = 0;
+      a.distAtLastHint = null;
+      drawAdventure();
+      renderPanel();
+      const label = FEATURE_LABEL[ctl.t](ctl);
+      setBanner(a.found < c.controls.length
+        ? `Control ${a.found} punched — ${label}. On to circle ${a.found + 1}.`
+        : `Control ${a.found} punched — ${label}. Now out to the double circle: the trail is ~${c.finishLegM} m away.`, true);
+    }
+  } else if (distMilesTo(c.finishPt) < PUNCH_MILES) {
     a.finished = true;
     renderPanel();
-    setBanner(a.cand.endsAtCar
-      ? "Out at your car — course complete! How was it?"
-      : `Back on trail at ${state.park.nodes[a.cand.finishId].name} — course complete! Your car is ${a.cand.homeMiles.toFixed(1)} mi away along the dashed line, no rush. How was it?`, true);
+    setBanner("Back on trail — course complete! How was it?", true);
   }
 }
 
 function giveHint() {
   const a = state.adventure;
   if (!a) return;
-  const target = a.found ? a.cand.finishId : a.cand.poi;
+  const c = a.cand;
+  const onFinish = a.found >= c.controls.length;
+  const target = currentTarget();
   const dNow = distMilesTo(target);
   let text;
-  if (a.found) {
-    text = dNow < 0.1 ? "The finish is close enough to smell. Almost there."
-      : "Work out which trail the double circle sits on, then find that trail. The finish hasn't moved; your confidence shouldn't either.";
+  if (onFinish) {
+    text = dNow < 0.06 ? "The trail is close enough to smell. Keep going."
+      : "The double circle sits on a trail. Pick the line back that feels inevitable.";
   } else {
-    text = hintFor(a.cand.poi, a.hintIndex, dNow, a.distAtLastHint);
+    const f = c.controls[a.found].f;
+    text = hintFor({ hints: [FEATURE_HINT[f.t]] }, a.hintIndex, dNow, a.distAtLastHint);
     a.hintIndex++;
   }
   a.distAtLastHint = dNow;
@@ -325,32 +338,25 @@ function giveHint() {
 
 function finishAdventure(rating) {
   const a = state.adventure;
-  recordOutcome(state.prefs, a.cand.poi, rating);
+  const c = a.cand;
+  recordOutcome(state.prefs, { id: `easy-${c.controls.map(x => x.f.t).join("-")}`, tags: [] }, rating);
   state.history.unshift({
     date: new Date().toISOString().slice(0, 10),
     park: state.park.name,
-    poi: a.cand.poi.name,
-    tags: a.cand.poi.tags,
-    miles: a.cand.stats.miles,
-    cls: a.cand.cls,
+    poi: `Easy course — ${c.controls.map(x => x.f.t).join(", ")}`,
+    tags: [],
+    miles: c.totalM / 1609.34,
+    controls: c.controls.length,
     rating,
   });
   save();
-  const cand = a.cand;
   state.adventure = null;
   state.candidates = [];
   state.showYou = true;
   state.map.clearCourse();
-  if (!cand.endsAtCar) state.map.previewRoute(routePts(state.park, state.adj, cand.homeIds)); // leave the way home on the map
   updateYou();
   renderPanel();
-  const taste = topTastes(state.prefs);
-  const learned = taste.length
-    ? `I'm noticing you like: ${taste.map(t => TAGS[t].toLowerCase()).join(", ")}. Next suggestions will lean that way.`
-    : "A few more adventures and I'll start learning your taste.";
-  setBanner(cand.endsAtCar
-    ? `Logged it. ${learned}`
-    : `Logged it — the highlighted route is your ${cand.homeMiles.toFixed(1)} mi walk back to the car. Or hit “Suggest adventures” and turn it into another one. ${learned}`);
+  setBanner("Logged it. Hit “Suggest sidetracks” from anywhere on a trail and run another.");
 }
 
 function abandonAdventure() {
@@ -391,40 +397,38 @@ function renderPanel() {
     const p = document.createElement("p");
     p.className = "muted";
     p.textContent = state.carId
-      ? "Hike a little, or hit “Suggest adventures” when you're ready to wander."
+      ? "Get on a trail and hit “Suggest sidetracks” — courses build from wherever you stand."
       : "Tap the map where you parked (the P squares) to get started.";
     panel.appendChild(p);
     return;
   }
 
-  for (const c of state.candidates) {
+  state.candidates.forEach((c, ci) => {
     const card = document.createElement("div");
     card.className = "card";
-    const finishName = state.park.nodes[c.finishId].name;
+    const controlsHtml = c.controls
+      .map((ctl, i) => `<li><b>${i + 1}.</b> ${FEATURE_LABEL[ctl.f.t](ctl.f)} <span class="muted">· ${ctl.legM} m leg</span></li>`)
+      .join("");
     card.innerHTML = `
       <div class="card-head">
-        <h3>${c.poi.name}</h3>
-        ${c.onYourWay ? '<span class="chip way">on your way</span>' : ""}
+        <h3>Course ${"ABC"[ci]} — ${c.controls.length} control${c.controls.length > 1 ? "s" : ""} · ~${c.totalM} m</h3>
       </div>
-      <p class="blurb">${c.poi.blurb}</p>
-      <p class="finish-line">${c.endsAtCar
-        ? "Comes out right at your car."
-        : `Comes out at <b>${finishName}</b> — then ${c.homeMiles.toFixed(1)} mi back to the car when you're ready.`}</p>
-      <div class="badges">
-        <span class="chip len-${c.cls.len}">${LEN_LABEL[c.cls.len]} · ${c.stats.miles.toFixed(1)} mi</span>
-        <span class="chip eff-${c.cls.effort}">${EFFORT_LABEL[c.cls.effort]} · ${Math.round(c.stats.climb)} ft</span>
-        <span class="chip nav">Nav ${NAV_STARS(c.cls.nav)}</span>
-        ${c.poi.offTrail ? '<span class="chip off">off-trail control</span>' : ""}
-        <span class="chip">${((c.stats.miles + c.homeMiles) / PACE_MPH * 60).toFixed(0)} min all-in</span>
-      </div>
+      <ol class="control-list">${controlsHtml}</ol>
+      <p class="finish-line">Comes out on a trail ${c.finishLegM} m past the last control.</p>
       <div class="card-actions">
-        <button class="btn ghost preview">Peek route</button>
-        <button class="btn primary go">Make it an adventure</button>
+        <button class="btn ghost preview">Peek course</button>
+        <button class="btn primary go">Run it</button>
       </div>`;
-    card.querySelector(".preview").addEventListener("click", () => state.map.previewRoute(routePts(state.park, state.adj, c.ids)));
+    card.querySelector(".preview").addEventListener("click", () =>
+      state.map.drawCourse(
+        c.startPt,
+        c.controls.map((ctl) => ({ x: ctl.f.x, y: ctl.f.y, found: false })),
+        c.finishPt,
+        null,
+      ));
     card.querySelector(".go").addEventListener("click", () => startAdventure(c));
     panel.appendChild(card);
-  }
+  });
 }
 
 function renderAdventurePanel(panel) {
@@ -432,10 +436,12 @@ function renderAdventurePanel(panel) {
   const card = document.createElement("div");
   card.className = "card active-adventure";
 
+  const c = a.cand;
+  const n = c.controls.length;
   if (a.finished) {
     card.innerHTML = `
       <h3>Course complete 🏁</h3>
-      <p class="blurb">${a.cand.poi.name}, found and finished. Rate it so I learn:</p>
+      <p class="blurb">${n} control${n > 1 ? "s" : ""}, ~${c.totalM} m, all punched. Rate it so I learn:</p>
       <div class="card-actions rate">
         <button class="btn rate-btn" data-r="2">🤩 Loved it</button>
         <button class="btn rate-btn" data-r="1">🙂 Good</button>
@@ -444,26 +450,22 @@ function renderAdventurePanel(panel) {
     card.querySelectorAll(".rate-btn").forEach(b =>
       b.addEventListener("click", () => finishAdventure(parseInt(b.dataset.r, 10))));
   } else {
-    const finishName = state.park.nodes[a.cand.finishId].name;
-    const finishLabel = a.cand.endsAtCar ? "your car" : finishName;
+    const onFinish = a.found >= n;
+    const next = onFinish ? null : c.controls[a.found].f;
     card.innerHTML = `
-      <h3>${a.found ? `Leg 2 — out at ${finishLabel}` : `Control 1 — ${a.cand.poi.name}`}</h3>
-      <p class="blurb">${a.found
-        ? `You found it. Now navigate to the double circle${a.cand.endsAtCar
-            ? " — it's your car."
-            : ` at ${finishName}. The faint dashed line from there is your eventual walk home (${a.cand.homeMiles.toFixed(1)} mi).`}`
-        : "Navigate to the circle on the map. Your position is hidden; that's the fun part."}</p>
+      <h3>${onFinish ? "Last leg — out to the trail" : `Control ${a.found + 1} of ${n}`}</h3>
+      <p class="blurb">${onFinish
+        ? `All controls punched. Navigate to the double circle — a trail ~${c.finishLegM} m away.`
+        : `<b>${FEATURE_LABEL[next.t](next)}</b> — about ${c.controls[a.found].legM} m along your handrail. Your position is hidden; that's the fun part.`}</p>
       <div class="badges">
-        <span class="chip">${a.cand.stats.miles.toFixed(1)} mi course</span>
-        ${a.cand.endsAtCar ? "" : `<span class="chip">+${a.cand.homeMiles.toFixed(1)} mi home later</span>`}
-        <span class="chip nav">Nav ${NAV_STARS(a.cand.cls.nav)}</span>
+        <span class="chip">${a.found}/${n} punched</span>
+        <span class="chip">~${c.totalM} m course</span>
       </div>
       <div class="card-actions">
         <button class="btn primary hint">Give me a hint</button>
         <button class="btn ghost spoiler">${state.showYou ? "Hide me" : "Show me (spoiler)"}</button>
         <button class="btn ghost abandon">Abandon</button>
-        ${state.mode === "demo" && !a.found ? '<button class="btn ghost found-demo">I found it</button>' : ""}
-        ${state.mode === "demo" && a.found ? '<button class="btn ghost found-demo">I\'m at the finish</button>' : ""}
+        ${state.mode === "demo" ? `<button class="btn ghost found-demo">${onFinish ? "I'm at the finish" : "I found it"}</button>` : ""}
       </div>`;
     card.querySelector(".hint").addEventListener("click", giveHint);
     card.querySelector(".spoiler").addEventListener("click", () => {
@@ -475,10 +477,9 @@ function renderAdventurePanel(panel) {
     const fd = card.querySelector(".found-demo");
     if (fd) fd.addEventListener("click", () => {
       // demo shortcut: declare arrival (honor system, like real orienteering)
-      const target = a.found ? a.cand.finishId : a.cand.poi;
+      const target = currentTarget();
       if (distMilesTo(target) < 0.12) {
-        const t = typeof target === "string" ? state.park.nodes[target] : target;
-        state.pos = { x: t.x, y: t.y };
+        state.pos = { x: target.x, y: target.y };
         checkArrivals();
       } else {
         setBanner("Hmm — you don't seem close enough to punch that control. Keep looking.");
@@ -505,8 +506,9 @@ function renderHistory() {
     const face = h.rating === 2 ? "🤩" : h.rating === 1 ? "🙂" : "😐";
     div.innerHTML = `
       <div class="card-head"><h3>${h.poi}</h3><span>${face}</span></div>
-      <p class="muted">${h.date} · ${h.park} · ${h.miles.toFixed(1)} mi ·
-        ${LEN_LABEL[h.cls.len]} / ${EFFORT_LABEL[h.cls.effort]} / Nav ${NAV_STARS(h.cls.nav)}</p>`;
+      <p class="muted">${h.date} · ${h.park} · ${h.miles.toFixed(2)} mi${h.controls
+        ? ` · ${h.controls} control${h.controls > 1 ? "s" : ""}`
+        : h.cls ? ` · ${LEN_LABEL[h.cls.len]} / ${EFFORT_LABEL[h.cls.effort]} / Nav ${NAV_STARS(h.cls.nav)}` : ""}</p>`;
     list.appendChild(div);
   }
 }
@@ -533,4 +535,29 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   $("#hint-close").addEventListener("click", () => $("#hint-box").classList.remove("show"));
   pickPark("redmountain");
+
+  // debug: ?autotest drives a full course end-to-end (for headless checks)
+  if (new URLSearchParams(location.search).has("autotest")) {
+    setTimeout(() => {
+      try {
+        setCar(Object.entries(state.park.nodes).find(([, n]) => n.parking)[0]);
+        const ids = Object.keys(state.park.nodes);
+        const mid = state.park.nodes[ids[Math.floor(ids.length / 2)]];
+        state.pos = { x: mid.x, y: mid.y };
+        suggestNow();
+        if (!state.candidates.length) { setBanner("AUTOTEST: no candidates"); return; }
+        startAdventure(state.candidates[0]);
+        const c = state.adventure.cand;
+        for (const ctl of c.controls) {
+          state.pos = { x: ctl.f.x, y: ctl.f.y };
+          checkArrivals();
+        }
+        state.pos = { x: c.finishPt.x, y: c.finishPt.y };
+        checkArrivals();
+        setBanner((state.adventure.finished ? "AUTOTEST PASS — " : "AUTOTEST INCOMPLETE — ") + $("#banner").textContent);
+      } catch (e) {
+        setBanner("AUTOTEST FAIL: " + e.message);
+      }
+    }, 400);
+  }
 });
