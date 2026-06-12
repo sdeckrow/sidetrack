@@ -270,7 +270,6 @@ function drawAdventure() {
     c.startPt,
     c.controls.map((ctl, i) => ({ x: ctl.f.x, y: ctl.f.y, found: i < a.found })),
     c.finishPt,
-    null,
   );
   updateYou();
 }
@@ -414,19 +413,24 @@ function renderPanel() {
         <h3>Course ${"ABC"[ci]} — ${c.controls.length} control${c.controls.length > 1 ? "s" : ""} · ~${c.totalM} m</h3>
       </div>
       <ol class="control-list">${controlsHtml}</ol>
-      <p class="finish-line">Comes out on a trail ${c.finishLegM} m past the last control.</p>
+      <p class="finish-line">Comes out on a trail ${c.finishLegM} m past the last control. <span class="muted">Tap card to preview.</span></p>
       <div class="card-actions">
-        <button class="btn ghost preview">Peek course</button>
         <button class="btn primary go">Run it</button>
       </div>`;
-    card.querySelector(".preview").addEventListener("click", () =>
+    // tap anywhere on the card to preview the course on the map
+    card.addEventListener("click", () => {
+      panel.querySelectorAll(".card").forEach((el2) => el2.classList.remove("selected"));
+      card.classList.add("selected");
       state.map.drawCourse(
         c.startPt,
         c.controls.map((ctl) => ({ x: ctl.f.x, y: ctl.f.y, found: false })),
         c.finishPt,
-        null,
-      ));
-    card.querySelector(".go").addEventListener("click", () => startAdventure(c));
+      );
+    });
+    card.querySelector(".go").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      startAdventure(c);
+    });
     panel.appendChild(card);
   });
 }

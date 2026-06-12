@@ -323,60 +323,51 @@ class ParkMap {
     if (this.gFeatures) { this.gFeatures.remove(); this.gFeatures = null; }
   }
 
-  /* ---- course overlay (orienteering purple) ---- */
+  /* ---- course overlay (orienteering purple) ----
+   * Points only — start triangle, numbered control circles, double-circle
+   * finish. No leg lines. Symbols keep a constant SCREEN size: the course
+   * re-renders on every zoom with sizes scaled to the current view. */
 
-  clearCourse() { this.gCourse.innerHTML = ""; }
+  clearCourse() { this.courseData = null; this.gCourse.innerHTML = ""; }
 
-  /**
-   * Draw start triangle at `startPt`, control circles at `controls`
-   * ({x, y, found}), double circle at `finishNode`, connected by straight
-   * purple legs (orienteering convention). `homePts`, if given, is the
-   * eventual walk back to the car: a faint dashed polyline.
-   */
-  drawCourse(startPt, controls, finishNode, homePts) {
-    this.clearCourse();
-    const P = COLORS.course;
-    if (homePts && homePts.length > 3) {
-      el("path", {
-        d: flatPath(homePts), fill: "none", stroke: P, "stroke-width": 2,
-        "stroke-dasharray": "2 8", "stroke-linecap": "round", opacity: 0.5,
-      }, this.gCourse);
-    }
-    const pts = [startPt, ...controls, { x: finishNode.x, y: finishNode.y }];
-    for (let i = 0; i + 1 < pts.length; i++) {
-      el("line", {
-        x1: pts[i].x, y1: pts[i].y, x2: pts[i + 1].x, y2: pts[i + 1].y,
-        stroke: P, "stroke-width": 2.4, opacity: 0.75,
-      }, this.gCourse);
-    }
-    // start triangle
-    const s = 15;
-    el("path", {
-      d: `M ${startPt.x} ${startPt.y - s} L ${startPt.x + s * 0.87} ${startPt.y + s / 2} L ${startPt.x - s * 0.87} ${startPt.y + s / 2} Z`,
-      fill: "none", stroke: P, "stroke-width": 3,
-    }, this.gCourse);
-    // controls
-    controls.forEach((c, i) => {
-      el("circle", { cx: c.x, cy: c.y, r: 16, fill: "none", stroke: P, "stroke-width": 3, opacity: c.found ? 0.45 : 1 }, this.gCourse);
-      const t = el("text", { x: c.x + 20, y: c.y - 13, class: "control-num" }, this.gCourse);
-      t.textContent = c.found ? `${i + 1} ✓` : `${i + 1}`;
-      if (c.found) {
-        el("path", { d: `M ${c.x - 8} ${c.y} L ${c.x - 2} ${c.y + 7} L ${c.x + 9} ${c.y - 8}`, fill: "none", stroke: P, "stroke-width": 3 }, this.gCourse);
-      }
-    });
-    // finish: double circle
-    el("circle", { cx: finishNode.x, cy: finishNode.y, r: 13, fill: "none", stroke: P, "stroke-width": 3 }, this.gCourse);
-    el("circle", { cx: finishNode.x, cy: finishNode.y, r: 19, fill: "none", stroke: P, "stroke-width": 3 }, this.gCourse);
+  drawCourse(startPt, controls, finishPt) {
+    this.courseData = { startPt, controls, finishPt };
+    this._renderCourse();
   }
 
-  /* Faint preview of a candidate route, following real trail geometry. */
-  previewRoute(routePts) {
-    this.clearCourse();
-    if (!routePts || routePts.length < 4) return;
+  /* map units per screen pixel right now */
+  _mapPerScreenPx() {
+    const w = this.svg.getBoundingClientRect().width || 800;
+    return this.view.w / w;
+  }
+
+  _renderCourse() {
+    this.gCourse.innerHTML = "";
+    if (!this.courseData) return;
+    const { startPt, controls, finishPt } = this.courseData;
+    const P = COLORS.course;
+    const k = this._mapPerScreenPx();
+    const sw = 2.2 * k; // ~2 px strokes on screen
+
+    // start triangle (~9 px on screen)
+    const s = 9 * k;
     el("path", {
-      d: flatPath(routePts), fill: "none",
-      stroke: COLORS.course, "stroke-width": 5, opacity: 0.3, "stroke-linecap": "round",
+      d: `M ${startPt.x} ${startPt.y - s} L ${startPt.x + s * 0.87} ${startPt.y + s / 2} L ${startPt.x - s * 0.87} ${startPt.y + s / 2} Z`,
+      fill: "none", stroke: P, "stroke-width": sw,
     }, this.gCourse);
+    // numbered controls (~9 px radius on screen)
+    const r = 9 * k;
+    controls.forEach((c, i) => {
+      el("circle", { cx: c.x, cy: c.y, r, fill: "none", stroke: P, "stroke-width": sw, opacity: c.found ? 0.45 : 1 }, this.gCourse);
+      const t = el("text", {
+        x: c.x + r * 1.3, y: c.y - r * 0.9, class: "control-num",
+        style: `font-size:${13 * k}px`,
+      }, this.gCourse);
+      t.textContent = c.found ? `${i + 1} ✓` : `${i + 1}`;
+    });
+    // finish: double circle
+    el("circle", { cx: finishPt.x, cy: finishPt.y, r: 6.5 * k, fill: "none", stroke: P, "stroke-width": sw }, this.gCourse);
+    el("circle", { cx: finishPt.x, cy: finishPt.y, r: 10 * k, fill: "none", stroke: P, "stroke-width": sw }, this.gCourse);
   }
 
   /* ---- live position ---- */
@@ -393,6 +384,7 @@ class ParkMap {
     const v = this.view;
     this.svg.setAttribute("viewBox", `${v.x} ${v.y} ${v.w} ${v.h}`);
     this._updateTiles();
+    this._renderCourse(); // course symbols keep constant screen size
   }
 
   _clientToMap(cx, cy) {

@@ -230,15 +230,21 @@ function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, 
       const depth = inverted ? Math.min(c - L, c - R) : Math.min(L - c, R - c);
       stations.push({ s, depth });
     }
+    // core: the stretch that proves the feature at full depth
     let a = 0, b = stations.length - 1;
     while (a <= b && stations[a].depth < depthMin) a++;
     while (b >= a && stations[b].depth < depthMin) b--;
     if (b - a < 3) continue;
-    const kept = stations.slice(a, b + 1);
-    const passing = kept.filter((x) => x.depth >= depthMin);
-    if (passing.length / kept.length < 0.6) continue;
+    const core = stations.slice(a, b + 1);
+    const passing = core.filter((x) => x.depth >= depthMin);
+    if (passing.length / core.length < 0.6) continue;
     const depths = passing.map((x) => x.depth).sort((x, y) => x - y);
     const median = depths[(depths.length / 2) | 0];
+    // hysteresis: once confirmed, follow the feature's projection outward
+    // at half depth — captures the shallow head and the tapering nose
+    const depthLow = depthMin * 0.5;
+    while (a > 0 && stations[a - 1].depth >= depthLow) a--;
+    while (b < stations.length - 1 && stations[b + 1].depth >= depthLow) b++;
     const cells = pts.slice(stations[a].s, stations[b].s + 1);
     if (cells.length * cellM < minLenM) continue; // too short to navigate by
     out.push({ cells, depth: median, lenCells: cells.length });
