@@ -60,6 +60,7 @@ class ParkMap {
     // layers, bottom to top
     this.gPaper = el("g", {}, svg);
     this.gBase = el("g", {}, svg);   // USGS Topo tiles
+    this.gContours = el("g", {}, svg); // our lidar vector contours: crisp at any zoom
     this.gTrails = el("g", {}, svg);
     this.gBoundary = el("g", {}, svg);
     this.gLabels = el("g", { class: "map-labels" }, svg);
@@ -69,6 +70,7 @@ class ParkMap {
     el("rect", { x: 0, y: 0, width: W, height: H, fill: COLORS.paper }, this.gPaper);
 
     this._drawBasemap();
+    this._drawContours();
     this._drawTrails();
     this._drawBoundary();
     this._drawFurniture();
@@ -93,6 +95,25 @@ class ParkMap {
     this.gBase.setAttribute("clip-path", `url(#${clipId})`);
     this.mountedTiles = new Map(); // "z/x/y" -> <image>
     this._updateTiles();
+  }
+
+  /* Lidar-derived vector contours over the raster basemap: they trace the
+   * same terrain as the USGS lines but stay thin and dark at any zoom. */
+  _drawContours() {
+    const c = this.park.contours;
+    if (!c) return;
+    for (const line of c.minor) {
+      el("path", {
+        d: flatPath(line), fill: "none", stroke: COLORS.contour,
+        "stroke-width": 0.8, opacity: 0.85, "vector-effect": "non-scaling-stroke",
+      }, this.gContours);
+    }
+    for (const line of c.index) {
+      el("path", {
+        d: flatPath(line.pts), fill: "none", stroke: COLORS.contourIndex,
+        "stroke-width": 1.6, opacity: 0.9, "vector-effect": "non-scaling-stroke",
+      }, this.gContours);
+    }
   }
 
   _tileMath(z) {
@@ -162,6 +183,7 @@ class ParkMap {
         d: flatPath(e.pts), fill: "none",
         stroke: COLORS.trail, "stroke-width": e.nav >= 3 ? 1.1 : 1.5,
         "stroke-dasharray": dash, "stroke-linecap": "butt", class: "trail-edge",
+        "vector-effect": "non-scaling-stroke",
       }, this.gTrails);
     }
     // junction dots + parking squares
@@ -239,10 +261,11 @@ class ParkMap {
       const g = el("g", { opacity: far ? 0.35 : 0.95 }, this.gFeatures);
       const r = 3;
       if (s.shape === "axis") {
-        // axis polyline, width scaled by measured depth
+        // axis polyline: thin, constant screen width at any zoom
         el("path", {
           d: flatPath(f.pts), fill: "none", stroke: s.color,
-          "stroke-width": Math.min(4, 1 + f.depth / 12), "stroke-linecap": "round",
+          "stroke-width": Math.min(2, 0.8 + f.depth / 30), "stroke-linecap": "round",
+          "vector-effect": "non-scaling-stroke",
         }, g);
         const tip = el("title", {}, g);
         tip.textContent = `${f.t} axis · ${f.depth} ft deep · ${f.len} m long · ${(f.dT / this.park.pxPerMile).toFixed(2)} mi to trail`;

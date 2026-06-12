@@ -17,8 +17,8 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { decodePNG } from "./png.mjs";
-import { extractFeatures } from "./terrain.mjs";
+import { extractFeatures, smooth3 } from "./terrain.mjs";
+import { loadLidar } from "./lidar.mjs";
 import { TAGS, PARK_CONTENT } from "./park-content.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -53,39 +53,6 @@ const lat2px = (lat) => {
 const px2lng = (px) => (px / (2 ** Z * TILE)) * 360 - 180;
 const px2lat = (py) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * py) / (2 ** Z * TILE)))) * 180) / Math.PI;
 
-/* ---------------- DEM ---------------- */
-
-class DEM {
-  constructor() { this.tiles = new Map(); }
-  async load(x, y) {
-    const key = `${x}/${y}`;
-    if (this.tiles.has(key)) return this.tiles.get(key);
-    const buf = await readFile(path.join(HERE, "raw", "tiles", String(Z), String(x), `${y}.png`));
-    const png = decodePNG(buf);
-    const elev = new Float32Array(TILE * TILE);
-    for (let i = 0; i < TILE * TILE; i++) {
-      const o = i * png.channels;
-      elev[i] = png.data[o] * 256 + png.data[o + 1] + png.data[o + 2] / 256 - 32768;
-    }
-    this.tiles.set(key, elev);
-    return elev;
-  }
-  /* elevation in feet at global mercator pixel coords (bilinear) */
-  atPx(px, py) {
-    const x0 = Math.floor(px - 0.5), y0 = Math.floor(py - 0.5);
-    const fx = px - 0.5 - x0, fy = py - 0.5 - y0;
-    const v = (x, y) => {
-      const t = this.tiles.get(`${Math.floor(x / TILE)}/${Math.floor(y / TILE)}`);
-      return t ? t[(y % TILE) * TILE + (x % TILE)] : NaN;
-    };
-    const m =
-      v(x0, y0) * (1 - fx) * (1 - fy) + v(x0 + 1, y0) * fx * (1 - fy) +
-      v(x0, y0 + 1) * (1 - fx) * fy + v(x0 + 1, y0 + 1) * fx * fy;
-    return m * 3.28084;
-  }
-  atLL(lat, lng) { return this.atPx(lng2px(lng), lat2px(lat)); }
-}
-
 /* ---------------- polyline utils ---------------- */
 
 function rdp(pts, eps) {
@@ -119,24 +86,13 @@ const flat = (pts) => pts.flatMap(([x, y]) => [Math.round(x * 10) / 10, Math.rou
 
 /* ---------------- contours (marching squares) ---------------- */
 
-function buildGrid(dem, bbox) {
-  const px0 = Math.floor(lng2px(bbox.lngMin)), px1 = Math.ceil(lng2px(bbox.lngMax));
-  const py0 = Math.floor(lat2px(bbox.latMax)), py1 = Math.ceil(lat2px(bbox.latMin));
-  const W = px1 - px0, H = py1 - py0;
-  const grid = new Float32Array(W * H);
-  let lo = Infinity, hi = -Infinity;
-  for (let y = 0; y < H; y++)
-    for (let x = 0; x < W; x++) {
-      const e = dem.atPx(px0 + x + 0.5, py0 + y + 0.5);
-      grid[y * W + x] = e;
-      if (e < lo) lo = e;
-      if (e > hi) hi = e;
-    }
-  return { grid, W, H, px0, py0, lo, hi };
-}
-
 function buildContours(gridInfo, project, intervalFt, indexEvery) {
-  const { grid, W, H, px0, py0, lo, hi } = gridInfo;
+  const { grid, W, H, toLL } = gridInfo;
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < grid.length; i++) {
+    if (grid[i] < lo) lo = grid[i];
+    if (grid[i] > hi) hi = grid[i];
+  }
 
   const levels = [];
   for (let l = Math.ceil(lo / intervalFt) * intervalFt; l < hi; l += intervalFt) levels.push(l);
@@ -199,8 +155,8 @@ function buildContours(gridInfo, project, intervalFt, indexEvery) {
       if (line.length < 5) continue;
       // cell coords → lat/lng → map coords, smooth, simplify
       let pts = line.map(([cx, cy]) => {
-        const lat = px2lat(py0 + cy + 0.5), lng = px2lng(px0 + cx + 0.5);
-        const m = project(lat, lng);
+        const ll = toLL(cx, cy);
+        const m = project(ll.lat, ll.lng);
         return [m.x, m.y];
       });
       pts = rdp(chaikin(pts), 0.9);
@@ -353,7 +309,6 @@ function buildGraph(elements, boundaryGeom, dem, project) {
 
 /* ---------------- main ---------------- */
 
-const dem = new DEM();
 const out = {};
 
 for (const parkId of ["redmountain", "oakmountain"]) {
@@ -374,17 +329,17 @@ for (const parkId of ["redmountain", "oakmountain"]) {
   });
   console.log(`map ${MAP_W}x${mapH}, ${pxPerMile.toFixed(0)} px/mi`);
 
-  // DEM tiles for this bbox
-  const tx0 = Math.floor(lng2px(bbox.lngMin) / TILE), tx1 = Math.floor(lng2px(bbox.lngMax) / TILE);
-  const ty0 = Math.floor(lat2px(bbox.latMax) / TILE), ty1 = Math.floor(lat2px(bbox.latMin) / TILE);
-  for (let x = tx0; x <= tx1; x++) for (let y = ty0; y <= ty1; y++) await dem.load(x, y);
+  // USGS 3DEP lidar elevation (fetch-lidar.mjs)
+  const gridInfo = await loadLidar(parkId);
+  console.log(`lidar: ${gridInfo.W}x${gridInfo.H} @ ${gridInfo.res} m/px`);
 
-  const interval = parkId === "oakmountain" ? 40 : 20;
-  const gridInfo = buildGrid(dem, bbox);
-  const contours = buildContours(gridInfo, project, interval, 5);
+  // vector contour overlay, 20 ft to match the USGS basemap interval
+  const interval = 20;
+  const cGrid = smooth3(smooth3(gridInfo.grid, gridInfo.W, gridInfo.H), gridInfo.W, gridInfo.H);
+  const contours = buildContours({ ...gridInfo, grid: cGrid }, project, interval, 5);
   console.log(`contours: ${contours.minor.length} minor + ${contours.index.length} index (${contours.lo}–${contours.hi} ft, ${interval} ft interval)`);
 
-  const { nodes, edges } = buildGraph(raw.elements, raw.boundary.geometry, dem, project);
+  const { nodes, edges } = buildGraph(raw.elements, raw.boundary.geometry, gridInfo, project);
   console.log(`graph: ${Object.keys(nodes).length} nodes, ${edges.length} edges, ${edges.reduce((s, e) => s + e.miles, 0).toFixed(1)} trail miles`);
 
   /* parking: a lot is a trailhead if it sits close to a trail node
@@ -442,10 +397,10 @@ for (const parkId of ["redmountain", "oakmountain"]) {
   const boundary = polyOf(raw.boundary);
 
   /* terrain features: candidate control points for course generation */
-  const cellM = (156543.03392 * Math.cos(midLat)) / 2 ** Z;
+  const cellM = gridInfo.res * Math.cos(midLat); // merc meters → ground meters
   const features = extractFeatures(gridInfo, {
     cellM,
-    toMap: (cx, cy) => project(px2lat(gridInfo.py0 + cy + 0.5), px2lng(gridInfo.px0 + cx + 0.5)),
+    toMap: (cx, cy) => { const ll = gridInfo.toLL(cx, cy); return project(ll.lat, ll.lng); },
     boundaryFlat: boundary,
     streams,
     trailPts: edges.flatMap((e) => e.pts),
@@ -522,12 +477,13 @@ for (const parkId of ["redmountain", "oakmountain"]) {
       y1: Math.floor(lat2px(bbox.latMin) / TILE / 2 ** (Z - TZ)),
     })),
   };
-  void contours; void veg; void scrub; void roads; void labels; // display now comes from USGS tiles
+  void veg; void scrub; void roads; void labels; // display now comes from USGS tiles
 
   out[parkId] = {
     id: parkId, name: content.name, tagline: content.tagline,
     mapW: MAP_W, mapH, pxPerMile: Math.round(pxPerMile * 10) / 10,
-    geo: bbox, tiles,
+    geo: bbox, tiles, contourInterval: interval,
+    contours: { minor: contours.minor, index: contours.index },
     boundary, water, streams, dams, parkingLots,
     nodes, edges, pois, lakeLabels, features,
   };

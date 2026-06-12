@@ -10,6 +10,8 @@
  *   spur axes: the same trace on the inverted DEM follows crests; the
  *     cross-section check requires ground falling away on both sides.
  *
+ * All thresholds are metric (meters/feet), scaled to the grid's cell
+ * size, so the same code works on 4 m terrarium or 1–2 m lidar input.
  * Only axes that survive the cross-section gate are kept, with honest
  * credentials: median depth (ft) and length (m).
  */
@@ -17,93 +19,105 @@
 export function extractFeatures(gridInfo, opts) {
   const { grid, W, H } = gridInfo;
   const { cellM, toMap, boundaryFlat, streams, trailPts, caps = {} } = opts;
-  const cellFt = cellM * 3.28084;
 
-  /* ---- smooth (3 passes — the DEM has interpolation noise) ---- */
-  const S = smooth3(smooth3(smooth3(grid, W, H), W, H), W, H);
+  /* ---- axis-analysis grid: ~2.5 m cells, whatever the input res ----
+   * Resolution-independent behavior: flow tracing on sub-2 m lidar braids
+   * into fragments, so we analyze at ~2.5 m and keep lidar's accuracy. */
+  const kA = Math.max(1, Math.round(2.5 / cellM));
+  const WA = Math.floor(W / kA), HA = Math.floor(H / kA);
+  const cellMA = cellM * kA, cellFtA = cellMA * 3.28084;
+  let SA = new Float32Array(WA * HA);
+  for (let y = 0; y < HA; y++)
+    for (let x = 0; x < WA; x++) SA[y * WA + x] = grid[y * kA * W + x * kA];
+  SA = smooth3(smooth3(smooth3(SA, WA, HA), WA, HA), WA, HA);
 
-  /* ---- slope (degrees) ---- */
-  const slope = new Float32Array(W * H);
-  for (let y = 1; y < H - 1; y++) {
-    for (let x = 1; x < W - 1; x++) {
-      const i = y * W + x;
-      const gx = (S[i + 1] - S[i - 1]) / (2 * cellFt);
-      const gy = (S[i + W] - S[i - W]) / (2 * cellFt);
+  /* ---- slope (degrees) on the axis grid ---- */
+  const slope = new Float32Array(WA * HA);
+  for (let y = 1; y < HA - 1; y++) {
+    for (let x = 1; x < WA - 1; x++) {
+      const i = y * WA + x;
+      const gx = (SA[i + 1] - SA[i - 1]) / (2 * cellFtA);
+      const gy = (SA[i + WA] - SA[i - WA]) / (2 * cellFtA);
       slope[i] = (Math.atan(Math.hypot(gx, gy)) * 180) / Math.PI;
     }
   }
 
   /* ---- D8 flow fields + accumulation (downhill and inverted) ---- */
-  const orderDesc = new Uint32Array(W * H);
-  for (let i = 0; i < W * H; i++) orderDesc[i] = i;
-  orderDesc.sort((a, b) => S[b] - S[a]);
-  const dirDown = flowField(S, W, H, false);
-  const dirUp = flowField(S, W, H, true);
+  const orderDesc = sortIdxByElevDesc(SA);
+  const dirDown = flowField(SA, WA, HA, false);
+  const dirUp = flowField(SA, WA, HA, true);
   const accum = accumulate(orderDesc, dirDown, false);
   const ridge = accumulate(orderDesc, dirUp, true);
 
-  /* ---- hilltops: must stand well proud of a ~100 m ring ---- */
+  /* ---- hilltops & saddles on a ~4 m decimated grid (scale-stable) ---- */
+  const k = Math.max(1, Math.round(4 / cellM));
+  const Wd = Math.floor(W / k), Hd = Math.floor(H / k);
+  const Sd = new Float32Array(Wd * Hd);
+  for (let y = 0; y < Hd; y++)
+    for (let x = 0; x < Wd; x++) Sd[y * Wd + x] = grid[y * k * W + x * k];
+  const sm = smooth3(Sd, Wd, Hd);
+  Sd.set(sm);
+
   const hills = [];
-  const RING = ringOffsets(25); // ~100 m
-  for (let y = 26; y < H - 26; y++) {
-    cell: for (let x = 26; x < W - 26; x++) {
-      const i = y * W + x, v = S[i];
+  const RING = ringOffsets(25); // ~100 m on the decimated grid
+  for (let y = 26; y < Hd - 26; y++) {
+    cell: for (let x = 26; x < Wd - 26; x++) {
+      const i = y * Wd + x, v = Sd[i];
       for (let dy = -4; dy <= 4; dy++)
         for (let dx = -4; dx <= 4; dx++) {
           if (!dx && !dy) continue;
-          if (S[i + dy * W + dx] >= v) continue cell;
+          if (Sd[i + dy * Wd + dx] >= v) continue cell;
         }
       let maxRing = -Infinity;
-      for (const [ox, oy] of RING) maxRing = Math.max(maxRing, S[i + oy * W + ox]);
+      for (const [ox, oy] of RING) maxRing = Math.max(maxRing, Sd[i + oy * Wd + ox]);
       const relief = v - maxRing; // EVERY direction must drop, not just one
-      if (relief >= 18) hills.push({ x, y, q: relief });
+      if (relief >= 18) hills.push({ x: x * k, y: y * k, q: relief, e: v });
     }
   }
 
-  /* ---- saddles ---- */
   const saddles = [];
   const SR = ringOffsets(8, 24); // ~32 m ring: real saddles, not dips
-  for (let y = 9; y < H - 9; y++) {
-    for (let x = 9; x < W - 9; x++) {
-      const i = y * W + x, v = S[i];
+  for (let y = 9; y < Hd - 9; y++) {
+    for (let x = 9; x < Wd - 9; x++) {
+      const i = y * Wd + x, v = Sd[i];
       let trans = 0, prev = 0, ampUp = 0, ampDn = 0;
-      for (let k = 0; k <= SR.length; k++) {
-        const [ox, oy] = SR[k % SR.length];
-        const d = S[i + oy * W + ox] - v;
+      for (let j = 0; j <= SR.length; j++) {
+        const [ox, oy] = SR[j % SR.length];
+        const d = Sd[i + oy * Wd + ox] - v;
         if (d > 0) ampUp = Math.max(ampUp, d);
         else ampDn = Math.max(ampDn, -d);
         const sgn = Math.abs(d) < 0.5 ? prev : Math.sign(d);
-        if (k > 0 && sgn !== prev && sgn !== 0 && prev !== 0) trans++;
+        if (j > 0 && sgn !== prev && sgn !== 0 && prev !== 0) trans++;
         prev = sgn || prev;
       }
       if (trans === 4 && Math.min(ampUp, ampDn) >= 13) {
-        saddles.push({ x, y, q: Math.min(ampUp, ampDn) });
+        saddles.push({ x: x * k, y: y * k, q: Math.min(ampUp, ampDn), e: v });
       }
     }
   }
 
-  const pickPts = (cands, cap, spacing = 30) => {
+  const spacingCells = Math.round(120 / cellM);
+  const pickPts = (cands, cap) => {
     cands.sort((a, b) => b.q - a.q);
     const out = [];
     for (const c of cands) {
       if (out.length >= cap) break;
-      if (out.every((o) => Math.abs(o.x - c.x) >= spacing || Math.abs(o.y - c.y) >= spacing)) out.push(c);
+      if (out.every((o) => Math.abs(o.x - c.x) >= spacingCells || Math.abs(o.y - c.y) >= spacingCells)) out.push(c);
     }
     return out;
   };
   const hillsP = pickPts(hills, caps.hill ?? 40);
   const saddlesP = pickPts(saddles, caps.saddle ?? 25);
 
-  /* ---- reentrant & spur AXES ---- */
-  const axisOpts = { W, H, S, slope, cellM, cellFt };
-  const reentAxes = traceAndValidate({
-    ...axisOpts, dir: dirDown, flow: accum, inverted: false,
-    A1: 100, A2: 8000, slopeMin: 4, depthMin: 10,
-  });
-  const spurAxes = traceAndValidate({
-    ...axisOpts, dir: dirUp, flow: ridge, inverted: true,
-    A1: 100, A2: 8000, slopeMin: 4, depthMin: 10,
-  });
+  /* ---- reentrant & spur AXES (metric thresholds, axis grid) ---- */
+  const axisShared = {
+    W: WA, H: HA, S: SA, slope, cellM: cellMA,
+    A1: Math.round(1600 / (cellMA * cellMA)),   // ≥ ~0.16 ha catchment
+    A2: Math.round(130000 / (cellMA * cellMA)), // ≤ ~13 ha — beyond that it's a valley
+    slopeMin: 4, depthMin: 10,
+  };
+  const reentAxes = dedupAxes(traceAndValidate({ ...axisShared, dir: dirDown, flow: accum, inverted: false }), cellMA);
+  const spurAxes = dedupAxes(traceAndValidate({ ...axisShared, dir: dirUp, flow: ridge, inverted: true }), cellMA);
 
   /* ---- to map coords, filter to park, attach metadata ---- */
   const trailIdx = new BucketIndex(trailPts, 64);
@@ -113,7 +127,7 @@ export function extractFeatures(gridInfo, opts) {
         const m = toMap(c.x, c.y);
         return {
           t, x: Math.round(m.x * 10) / 10, y: Math.round(m.y * 10) / 10,
-          e: Math.round(S[c.y * W + c.x]),
+          e: Math.round(c.e),
           q: Math.round(c.q * 10) / 10,
           dT: Math.round(trailIdx.nearest(m.x, m.y)),
         };
@@ -124,16 +138,17 @@ export function extractFeatures(gridInfo, opts) {
     list
       .sort((a, b) => b.depth * b.lenCells - a.depth * a.lenCells)
       .map((a) => {
-        const mapPts = a.cells.map(([cx, cy]) => { const m = toMap(cx, cy); return [m.x, m.y]; });
+        // axis-grid coords → full-grid coords → map
+        const mapPts = a.cells.map(([cx, cy]) => { const m = toMap(cx * kA, cy * kA); return [m.x, m.y]; });
         const simp = rdp(mapPts, 1.0);
         const mid = a.cells[Math.floor(a.cells.length / 2)];
-        const mm = toMap(mid[0], mid[1]);
+        const mm = toMap(mid[0] * kA, mid[1] * kA);
         return {
           t, pts: flat(simp),
           x: Math.round(mm.x * 10) / 10, y: Math.round(mm.y * 10) / 10, // midpoint = control anchor
-          e: Math.round(S[mid[1] * W + mid[0]]),
+          e: Math.round(SA[mid[1] * WA + mid[0]]),
           depth: Math.round(a.depth),
-          len: Math.round(a.lenCells * cellM),
+          len: Math.round(a.lenCells * cellMA),
           dT: Math.round(trailIdx.nearest(mm.x, mm.y)),
         };
       })
@@ -143,8 +158,8 @@ export function extractFeatures(gridInfo, opts) {
   return [
     ...finishPt(hillsP, "hill"),
     ...finishPt(saddlesP, "saddle"),
-    ...finishAxis(reentAxes, "reentrant", caps.reentrant ?? 130),
-    ...finishAxis(spurAxes, "spur", caps.spur ?? 130),
+    ...finishAxis(reentAxes, "reentrant", caps.reentrant ?? 250),
+    ...finishAxis(spurAxes, "spur", caps.spur ?? 250),
     ...streamFeatures(streams, boundaryFlat, trailIdx, caps),
   ];
 }
@@ -152,45 +167,47 @@ export function extractFeatures(gridInfo, opts) {
 /* ---------------- axis tracing + cross-section validation ---------------- */
 
 function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, slopeMin, depthMin }) {
-  // mask: cells that look like axis material
   const mask = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) {
     if (flow[i] >= A1 && flow[i] <= A2 && slope[i] >= slopeMin) mask[i] = 1;
   }
-  // heads: masked cells nothing masked flows into
   const hasParent = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) {
     if (mask[i] && dir[i] >= 0 && mask[dir[i]]) hasParent[dir[i]] = 1;
   }
   const claimed = new Int32Array(W * H);
   const paths = [];
+  const minPath = Math.round(50 / cellM), maxPath = Math.round(1500 / cellM);
   for (let i = 0; i < W * H; i++) {
     if (!mask[i] || hasParent[i] || claimed[i]) continue;
     const path = [];
-    let cur = i, id = paths.length + 1;
-    while (cur >= 0 && mask[cur] && !claimed[cur] && path.length < 4000) {
+    let cur = i;
+    const id = paths.length + 1;
+    while (cur >= 0 && mask[cur] && !claimed[cur] && path.length < maxPath) {
       claimed[cur] = id;
       path.push(cur);
       cur = dir[cur];
     }
     if (cur >= 0 && claimed[cur] && claimed[cur] !== id) path.push(cur); // join the junction
-    if (path.length >= 12) paths.push(path);
+    if (path.length >= minPath) paths.push(path);
   }
 
   /* cross-section gate: ground must rise (reentrant) / fall (spur)
    * on BOTH sides, at stations along the line */
+  const st = Math.max(2, Math.round(12 / cellM));
+  const off1 = Math.round(25 / cellM), off2 = Math.round(50 / cellM);
   const out = [];
   for (const path of paths) {
     const pts = path.map((i) => [i % W, (i / W) | 0]);
     const stations = [];
-    for (let s = 3; s < pts.length - 3; s += 3) {
-      const [tx, ty] = [pts[s + 3][0] - pts[s - 3][0], pts[s + 3][1] - pts[s - 3][1]];
+    for (let s = st; s < pts.length - st; s += st) {
+      const [tx, ty] = [pts[s + st][0] - pts[s - st][0], pts[s + st][1] - pts[s - st][1]];
       const tl = Math.hypot(tx, ty) || 1;
       const [nx, ny] = [-ty / tl, tx / tl];
       const c = S[pts[s][1] * W + pts[s][0]];
       const side = (sign) => {
         let extreme = inverted ? Infinity : -Infinity;
-        for (const off of [6, 12]) { // ~25 m and ~50 m out
+        for (const off of [off1, off2]) { // ~25 m and ~50 m out
           const sx = Math.round(pts[s][0] + nx * off * sign);
           const sy = Math.round(pts[s][1] + ny * off * sign);
           if (sx < 0 || sx >= W || sy < 0 || sy >= H) return null;
@@ -201,19 +218,17 @@ function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, 
       };
       const L = side(1), R = side(-1);
       if (L === null || R === null) { stations.push({ s, depth: -1 }); continue; }
-      // reentrant: both sides higher; spur: both sides lower
       const depth = inverted ? Math.min(c - L, c - R) : Math.min(L - c, R - c);
       stations.push({ s, depth });
     }
-    // trim shallow ends, then judge what's left
     let a = 0, b = stations.length - 1;
     while (a <= b && stations[a].depth < depthMin) a++;
     while (b >= a && stations[b].depth < depthMin) b--;
-    if (b - a < 3) continue; // too short after trim
+    if (b - a < 3) continue;
     const kept = stations.slice(a, b + 1);
-    const passing = kept.filter((st) => st.depth >= depthMin);
+    const passing = kept.filter((x) => x.depth >= depthMin);
     if (passing.length / kept.length < 0.6) continue;
-    const depths = passing.map((st) => st.depth).sort((x, y) => x - y);
+    const depths = passing.map((x) => x.depth).sort((x, y) => x - y);
     const median = depths[(depths.length / 2) | 0];
     const cells = pts.slice(stations[a].s, stations[b].s + 1);
     if (cells.length * cellM < 70) continue; // under ~70 m isn't a feature, it's a dent
@@ -222,21 +237,48 @@ function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, 
   return out;
 }
 
+/* Two traces braided down the same wide reentrant: keep the better one.
+ * Lines overlap if most sampled points sit within ~20 m of the other. */
+function dedupAxes(axes, cellM) {
+  const thresh = 20 / cellM;
+  axes.sort((a, b) => b.depth * b.lenCells - a.depth * a.lenCells);
+  const kept = [];
+  for (const a of axes) {
+    let overlapped = false;
+    for (const b of kept) {
+      let near = 0;
+      const N = 12;
+      for (let i = 0; i < N; i++) {
+        const p = a.cells[Math.floor((i / (N - 1)) * (a.cells.length - 1))];
+        let dMin = Infinity;
+        for (let j = 0; j < b.cells.length; j += 2) {
+          const q = b.cells[j];
+          const d = Math.hypot(p[0] - q[0], p[1] - q[1]);
+          if (d < dMin) dMin = d;
+        }
+        if (dMin <= thresh) near++;
+      }
+      if (near / N >= 0.55) { overlapped = true; break; }
+    }
+    if (!overlapped) kept.push(a);
+  }
+  return kept;
+}
+
 /* ---------------- flow helpers ---------------- */
 
-const NB = (W) => [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
 const NBD = [Math.SQRT2, 1, Math.SQRT2, 1, 1, Math.SQRT2, 1, Math.SQRT2];
 
 function flowField(S, W, H, inverted) {
   const dir = new Int32Array(W * H).fill(-1);
-  const nb = NB(W);
+  const nb = [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
   for (let y = 1; y < H - 1; y++) {
     for (let x = 1; x < W - 1; x++) {
       const i = y * W + x;
       let best = -1, bestDrop = 0;
-      for (let k = 0; k < 8; k++) {
-        const drop = (inverted ? S[i + nb[k]] - S[i] : S[i] - S[i + nb[k]]) / NBD[k];
-        if (drop > bestDrop) { bestDrop = drop; best = i + nb[k]; }
+      for (let j = 0; j < 8; j++) {
+        const drop = (inverted ? S[i + nb[j]] - S[i] : S[i] - S[i + nb[j]]) / NBD[j];
+        if (drop > bestDrop) { bestDrop = drop; best = i + nb[j]; }
       }
       dir[i] = best;
     }
@@ -244,16 +286,36 @@ function flowField(S, W, H, inverted) {
   return dir;
 }
 
+/* counting sort by elevation, descending — O(n), fine at 25M+ cells */
+function sortIdxByElevDesc(S) {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < S.length; i++) {
+    if (S[i] < lo) lo = S[i];
+    if (S[i] > hi) hi = S[i];
+  }
+  const Q = 65536, scale = (Q - 1) / Math.max(1e-9, hi - lo);
+  const counts = new Uint32Array(Q + 1);
+  for (let i = 0; i < S.length; i++) counts[Q - 1 - (((S[i] - lo) * scale) | 0)]++;
+  let sum = 0;
+  for (let b = 0; b < Q; b++) { const c = counts[b]; counts[b] = sum; sum += c; }
+  const order = new Uint32Array(S.length);
+  for (let i = 0; i < S.length; i++) {
+    const b = Q - 1 - (((S[i] - lo) * scale) | 0);
+    order[counts[b]++] = i;
+  }
+  return order;
+}
+
 function accumulate(orderDesc, dir, reverse) {
   const accum = new Float32Array(dir.length).fill(1);
   if (reverse) {
-    for (let k = orderDesc.length - 1; k >= 0; k--) {
-      const i = orderDesc[k];
+    for (let j = orderDesc.length - 1; j >= 0; j--) {
+      const i = orderDesc[j];
       if (dir[i] >= 0) accum[dir[i]] += accum[i];
     }
   } else {
-    for (let k = 0; k < orderDesc.length; k++) {
-      const i = orderDesc[k];
+    for (let j = 0; j < orderDesc.length; j++) {
+      const i = orderDesc[j];
       if (dir[i] >= 0) accum[dir[i]] += accum[i];
     }
   }
@@ -267,8 +329,8 @@ function streamFeatures(streams, boundaryFlat, trailIdx, caps) {
   const endCount = new Map();
   for (const s of streams) {
     for (const [x, y] of [[s[0], s[1]], [s[s.length - 2], s[s.length - 1]]]) {
-      const k = key(x, y);
-      endCount.set(k, { x, y, n: (endCount.get(k)?.n || 0) + 1 });
+      const kk = key(x, y);
+      endCount.set(kk, { x, y, n: (endCount.get(kk)?.n || 0) + 1 });
     }
   }
   const jcts = [...endCount.values()].filter((e) => e.n >= 2)
@@ -302,7 +364,7 @@ function streamFeatures(streams, boundaryFlat, trailIdx, caps) {
 
 /* ---------------- generic helpers ---------------- */
 
-function smooth3(src, W, H) {
+export function smooth3(src, W, H) {
   const out = new Float32Array(W * H);
   out.set(src);
   const tmp = new Float32Array(W * H);
