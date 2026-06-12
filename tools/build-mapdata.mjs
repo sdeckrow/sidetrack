@@ -511,14 +511,25 @@ for (const parkId of ["redmountain", "oakmountain"]) {
     return { x: Math.round(xs.reduce((a, b) => a + b) / xs.length), y: Math.round(ys.reduce((a, b) => a + b) / ys.length), text: w.name };
   });
 
+  // USGS Topo basemap tile ranges (tiles fetched by fetch-basemap.mjs)
+  const tiles = {
+    url: "tiles/usgstopo",
+    levels: [15, 16].map((TZ) => ({
+      z: TZ,
+      x0: Math.floor(lng2px(bbox.lngMin) / TILE / 2 ** (Z - TZ)),
+      x1: Math.floor(lng2px(bbox.lngMax) / TILE / 2 ** (Z - TZ)),
+      y0: Math.floor(lat2px(bbox.latMax) / TILE / 2 ** (Z - TZ)),
+      y1: Math.floor(lat2px(bbox.latMin) / TILE / 2 ** (Z - TZ)),
+    })),
+  };
+  void contours; void veg; void scrub; void roads; void labels; // display now comes from USGS tiles
+
   out[parkId] = {
     id: parkId, name: content.name, tagline: content.tagline,
     mapW: MAP_W, mapH, pxPerMile: Math.round(pxPerMile * 10) / 10,
-    geo: bbox,
-    contourInterval: interval,
-    boundary, contours: { minor: contours.minor, index: contours.index },
-    water, streams, dams, roads, veg: veg.concat(scrub), parkingLots,
-    nodes, edges, pois, labels, lakeLabels, features,
+    geo: bbox, tiles,
+    boundary, water, streams, dams, parkingLots,
+    nodes, edges, pois, lakeLabels, features,
   };
 }
 

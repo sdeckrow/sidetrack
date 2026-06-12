@@ -44,8 +44,17 @@ function pickPark(parkId) {
   state.map = new ParkMap($("#map"), state.park);
   state.map.onTap = onMapTap;
   // debug: ?features shows detected terrain features (course-gen candidates)
-  if (new URLSearchParams(location.search).has("features")) {
+  const params = new URLSearchParams(location.search);
+  if (params.has("features")) {
     state.map.showFeatures(state.park.features || []);
+  }
+  // debug: ?view=x,y,w jumps to a map view (for screenshot testing)
+  if (params.has("view")) {
+    const [x, y, w] = params.get("view").split(",").map(Number);
+    if (w > 0) {
+      state.map.view = { x, y, w, h: w * (state.map.H / state.map.W) };
+      state.map._applyView();
+    }
   }
   $("#park-select").value = parkId;
   renderPanel();

@@ -59,10 +59,7 @@ class ParkMap {
 
     // layers, bottom to top
     this.gPaper = el("g", {}, svg);
-    this.gVeg = el("g", {}, svg);
-    this.gContours = el("g", {}, svg);
-    this.gWater = el("g", {}, svg);
-    this.gRoads = el("g", {}, svg);
+    this.gBase = el("g", {}, svg);   // USGS Topo tiles
     this.gTrails = el("g", {}, svg);
     this.gBoundary = el("g", {}, svg);
     this.gLabels = el("g", { class: "map-labels" }, svg);
@@ -71,10 +68,9 @@ class ParkMap {
 
     el("rect", { x: 0, y: 0, width: W, height: H, fill: COLORS.paper }, this.gPaper);
 
-    this._drawTerrain();
+    this._drawBasemap();
     this._drawTrails();
     this._drawBoundary();
-    this._drawLabels();
     this._drawFurniture();
 
     // "you" marker (hidden until positioned)
@@ -83,69 +79,78 @@ class ParkMap {
     el("circle", { r: 6, class: "you-core" }, this.youDot);
   }
 
-  _drawTerrain() {
+  /* Real USGS Topo tiles (public domain), positioned in map coords.
+   * Level-of-detail: z15 for wide views, z16 when zoomed in; only tiles
+   * intersecting the current view (plus a margin) are mounted. Each tile
+   * rect is computed from its own mercator corners, so the mercator→
+   * equirectangular mismatch stays sub-pixel at park scale. */
+  _drawBasemap() {
     const p = this.park;
-    // USGS woodland tint over the park, white for open land
-    el("path", { d: flatPath(p.boundary, true), fill: COLORS.woodland }, this.gVeg);
-    for (const v of p.veg) {
-      el("path", { d: flatPath(v.pts, true), fill: COLORS.openLand }, this.gVeg);
-    }
-    // real contours from USGS elevation; index contours get elevation labels
-    for (const c of p.contours.minor) {
-      el("path", { d: flatPath(c), fill: "none", stroke: COLORS.contour, "stroke-width": 0.55, opacity: 0.85 }, this.gContours);
-    }
-    for (const c of p.contours.index) {
-      el("path", { d: flatPath(c.pts), fill: "none", stroke: COLORS.contourIndex, "stroke-width": 1.2, opacity: 0.95 }, this.gContours);
-      this._contourLabel(c);
-    }
-    // lakes & streams
-    for (const w of p.water) {
-      el("path", { d: flatPath(w.pts, true), fill: COLORS.water, stroke: COLORS.waterEdge, "stroke-width": 1.2 }, this.gWater);
-    }
-    for (const s of p.streams) {
-      el("path", { d: flatPath(s), fill: "none", stroke: COLORS.stream, "stroke-width": 1.4, "stroke-linecap": "round" }, this.gWater);
-    }
-    for (const d of p.dams) {
-      el("path", { d: flatPath(d), fill: "none", stroke: "#222", "stroke-width": 2.4, "stroke-linecap": "round" }, this.gWater);
-    }
-    // roads for context
-    for (const r of p.roads) {
-      el("path", {
-        d: flatPath(r.pts), fill: "none",
-        stroke: r.kind === "major" ? COLORS.roadMajor : COLORS.roadMinor,
-        "stroke-width": r.kind === "major" ? 2.6 : 1.3,
-      }, this.gRoads);
-    }
-    // parking lots
-    for (const lot of this.park.parkingLots) {
-      el("path", { d: flatPath(lot.pts, true), fill: "#dcdcd6", stroke: "#8e8e88", "stroke-width": 0.7 }, this.gRoads);
-    }
-    // light reference grid, half-mile spacing (topo-map furniture)
-    const step = this.park.pxPerMile / 2;
-    for (let x = step; x < this.W; x += step) {
-      el("line", { x1: x, y1: 0, x2: x, y2: this.H, stroke: COLORS.grid, "stroke-width": 0.4, opacity: 0.4 }, this.gVeg);
-    }
-    for (let y = step; y < this.H; y += step) {
-      el("line", { x1: 0, y1: y, x2: this.W, y2: y, stroke: COLORS.grid, "stroke-width": 0.4, opacity: 0.4 }, this.gVeg);
-    }
+    const clipId = `clip-${p.id}`;
+    const defs = el("defs", {}, this.svg);
+    const clip = el("clipPath", { id: clipId }, defs);
+    el("rect", { x: 0, y: 0, width: this.W, height: this.H }, clip);
+    this.gBase.setAttribute("clip-path", `url(#${clipId})`);
+    this.mountedTiles = new Map(); // "z/x/y" -> <image>
+    this._updateTiles();
   }
 
-  /* elevation label nestled along an index contour, USGS-style */
-  _contourLabel(c) {
-    const pts = c.pts;
-    if (pts.length < 40) return; // short scrap — no label
-    const mid = Math.floor(pts.length / 4) * 2;
-    const x1 = pts[mid - 2], y1 = pts[mid - 1], x2 = pts[mid + 2], y2 = pts[mid + 3];
-    if (x2 === undefined) return;
-    let rot = (Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI;
-    if (rot > 90) rot -= 180;
-    if (rot < -90) rot += 180;
-    const t = el("text", {
-      x: pts[mid], y: pts[mid + 1] + 2,
-      transform: `rotate(${rot} ${pts[mid]} ${pts[mid + 1]})`,
-      class: "contour-label", "text-anchor": "middle",
-    }, this.gContours);
-    t.textContent = c.e;
+  _tileMath(z) {
+    const g = this.park.geo, n = 2 ** z;
+    return {
+      tx2lng: (x) => (x / n) * 360 - 180,
+      ty2lat: (y) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI,
+      lng2tx: (lng) => ((lng + 180) / 360) * n,
+      lat2ty: (lat) => {
+        const r = (lat * Math.PI) / 180;
+        return ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n;
+      },
+      mapX: (lng) => ((lng - g.lngMin) / (g.lngMax - g.lngMin)) * this.W,
+      mapY: (lat) => ((g.latMax - lat) / (g.latMax - g.latMin)) * this.H,
+      lngOfMapX: (x) => g.lngMin + (x / this.W) * (g.lngMax - g.lngMin),
+      latOfMapY: (y) => g.latMax - (y / this.H) * (g.latMax - g.latMin),
+    };
+  }
+
+  /* tile pixels per map px at a given level (≈ constant per park) */
+  _tileDensity(level) {
+    return ((level.x1 - level.x0 + 1) * 256) / this.W;
+  }
+
+  _updateTiles() {
+    const p = this.park, v = this.view;
+    if (!this.mountedTiles) return;
+    // pick level: z16 once z15 pixels would stretch past ~1.3x on screen
+    const clientW = this.svg.getBoundingClientRect().width || 800;
+    const levels = p.tiles.levels;
+    const screenPerTilePx = (lv) => clientW / v.w / this._tileDensity(lv);
+    let level = levels[0];
+    for (const lv of levels) {
+      if (screenPerTilePx(level) > 1.3) level = lv;
+    }
+    const m = this._tileMath(level.z);
+    // visible tile range with a margin of 1
+    const x0 = Math.max(level.x0, Math.floor(m.lng2tx(m.lngOfMapX(v.x))) - 1);
+    const x1 = Math.min(level.x1, Math.floor(m.lng2tx(m.lngOfMapX(v.x + v.w))) + 1);
+    const y0 = Math.max(level.y0, Math.floor(m.lat2ty(m.latOfMapY(v.y))) - 1);
+    const y1 = Math.min(level.y1, Math.floor(m.lat2ty(m.latOfMapY(v.y + v.h))) + 1);
+
+    const want = new Set();
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) want.add(`${level.z}/${x}/${y}`);
+    for (const [key, img] of this.mountedTiles) {
+      if (!want.has(key)) { img.remove(); this.mountedTiles.delete(key); }
+    }
+    for (const key of want) {
+      if (this.mountedTiles.has(key)) continue;
+      const [z, x, y] = key.split("/").map(Number);
+      const mx1 = m.mapX(m.tx2lng(x)), mx2 = m.mapX(m.tx2lng(x + 1));
+      const my1 = m.mapY(m.ty2lat(y)), my2 = m.mapY(m.ty2lat(y + 1));
+      this.mountedTiles.set(key, el("image", {
+        href: `${p.tiles.url}/${z}/${x}/${y}.png`,
+        x: mx1, y: my1, width: mx2 - mx1, height: my2 - my1,
+        preserveAspectRatio: "none",
+      }, this.gBase));
+    }
   }
 
   _drawTrails() {
@@ -186,20 +191,13 @@ class ParkMap {
     }, this.gBoundary);
   }
 
-  _drawLabels() {
-    for (const l of this.park.lakeLabels || []) {
-      const t = el("text", { x: l.x, y: l.y, class: "lake-label", "text-anchor": "middle" }, this.gLabels);
-      t.textContent = l.text;
-    }
+  _drawFurniture() {
     // quad-style title block: small caps, top left, on a white tab
     const tb = el("g", {}, this.gLabels);
     const title = el("text", { x: 22, y: 34, class: "map-title" }, tb);
     title.textContent = this.park.name.toUpperCase();
-    const w = this.park.name.length * 11 + 24;
-    tb.insertBefore(el("rect", { x: 12, y: 14, width: w, height: 30, fill: "#fbfbf7", opacity: 0.85 }), title);
-  }
-
-  _drawFurniture() {
+    const tw = this.park.name.length * 11 + 24;
+    tb.insertBefore(el("rect", { x: 12, y: 14, width: tw, height: 30, fill: "#fbfbf7", opacity: 0.85 }), title);
     const { W, H } = this;
     // north arrow
     const na = el("g", { transform: `translate(${W - 42}, 52)` }, this.gLabels);
@@ -216,8 +214,8 @@ class ParkMap {
     }
     const st = el("text", { x: mi + 8, y: 4, class: "scale-text" }, sb);
     st.textContent = "1 mile";
-    const ct = el("text", { x: 0, y: -18, class: "scale-text" }, sb);
-    ct.textContent = `contours ${this.park.contourInterval} ft`;
+    const at = el("text", { x: 0, y: -18, class: "scale-text", opacity: 0.8 }, sb);
+    at.textContent = "Basemap: USGS The National Map";
   }
 
   /* ---- terrain-feature debug overlay ---- */
@@ -229,8 +227,8 @@ class ParkMap {
     const STYLE = {
       hill: { color: "#8a4b14", shape: "triangle" },
       saddle: { color: "#8a4b14", shape: "diamond" },
-      reentrant: { color: "#1d7d35", shape: "circle" },
-      spur: { color: "#d2691e", shape: "circle" },
+      reentrant: { color: "#0a8a2a", shape: "axis" },
+      spur: { color: "#e05c10", shape: "axis" },
       streambend: { color: "#1f6fa8", shape: "circle" },
       streamjct: { color: "#1f6fa8", shape: "square" },
     };
@@ -238,8 +236,18 @@ class ParkMap {
       const s = STYLE[f.t];
       if (!s) continue;
       const far = f.dT > this.park.pxPerMile * 0.3; // >0.3 mi from any trail
-      const g = el("g", { opacity: far ? 0.3 : 0.9 }, this.gFeatures);
+      const g = el("g", { opacity: far ? 0.35 : 0.95 }, this.gFeatures);
       const r = 3;
+      if (s.shape === "axis") {
+        // axis polyline, width scaled by measured depth
+        el("path", {
+          d: flatPath(f.pts), fill: "none", stroke: s.color,
+          "stroke-width": Math.min(4, 1 + f.depth / 12), "stroke-linecap": "round",
+        }, g);
+        const tip = el("title", {}, g);
+        tip.textContent = `${f.t} axis · ${f.depth} ft deep · ${f.len} m long · ${(f.dT / this.park.pxPerMile).toFixed(2)} mi to trail`;
+        continue;
+      }
       if (s.shape === "triangle") {
         el("path", { d: `M ${f.x} ${f.y - r - 1} L ${f.x + r} ${f.y + r - 1} L ${f.x - r} ${f.y + r - 1} Z`, fill: s.color }, g);
       } else if (s.shape === "diamond") {
@@ -256,13 +264,14 @@ class ParkMap {
     const lg = el("g", { transform: `translate(${this.W - 168}, ${this.H - 132})` }, this.gFeatures);
     el("rect", { x: 0, y: 0, width: 156, height: 120, fill: "#fbfbf7", opacity: 0.92, stroke: "#999", "stroke-width": 0.7, rx: 3 }, lg);
     const rows = [
-      ["hill", "hilltop"], ["saddle", "saddle"], ["reentrant", "reentrant"],
-      ["spur", "spur"], ["streambend", "stream bend"], ["streamjct", "stream junction"],
+      ["hill", "hilltop"], ["saddle", "saddle"], ["reentrant", "reentrant axis"],
+      ["spur", "spur axis"], ["streambend", "stream bend"], ["streamjct", "stream junction"],
     ];
     rows.forEach(([t, label], i) => {
       const y = 17 + i * 17;
       const s = STYLE[t];
-      if (s.shape === "triangle") el("path", { d: `M 14 ${y - 4} L 18 ${y + 3} L 10 ${y + 3} Z`, fill: s.color }, lg);
+      if (s.shape === "axis") el("path", { d: `M 8 ${y} L 20 ${y}`, stroke: s.color, "stroke-width": 2.5, "stroke-linecap": "round" }, lg);
+      else if (s.shape === "triangle") el("path", { d: `M 14 ${y - 4} L 18 ${y + 3} L 10 ${y + 3} Z`, fill: s.color }, lg);
       else if (s.shape === "diamond") el("path", { d: `M 14 ${y - 4} L 18 ${y} L 14 ${y + 4} L 10 ${y} Z`, fill: "none", stroke: s.color, "stroke-width": 1.4 }, lg);
       else if (s.shape === "square") el("rect", { x: 11, y: y - 3, width: 6, height: 6, fill: s.color }, lg);
       else el("circle", { cx: 14, cy: y, r: 3, fill: "none", stroke: s.color, "stroke-width": 1.5 }, lg);
@@ -344,6 +353,7 @@ class ParkMap {
   _applyView() {
     const v = this.view;
     this.svg.setAttribute("viewBox", `${v.x} ${v.y} ${v.w} ${v.h}`);
+    this._updateTiles();
   }
 
   _clientToMap(cx, cy) {
@@ -402,7 +412,11 @@ class ParkMap {
   _zoomAt(cx, cy, factor) {
     const v = this.view;
     const pt = this._clientToMap(cx, cy);
-    const nw = Math.min(this.W * 1.4, Math.max(120, v.w * factor));
+    // cap zoom where the deepest tile level is still sharp (~2.6x native)
+    const clientW = this.svg.getBoundingClientRect().width || 800;
+    const deepest = this.park.tiles.levels[this.park.tiles.levels.length - 1];
+    const minW = Math.max(60, clientW / (2.6 * this._tileDensity(deepest)));
+    const nw = Math.min(this.W * 1.4, Math.max(minW, v.w * factor));
     const nh = nw * (this.H / this.W);
     v.x = pt.x - ((pt.x - v.x) / v.w) * nw;
     v.y = pt.y - ((pt.y - v.y) / v.h) * nh;

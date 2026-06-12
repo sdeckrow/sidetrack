@@ -1,17 +1,17 @@
 /* Terrain-feature extraction from the DEM.
  *
- * Finds the features an orienteer navigates by — hilltops, saddles,
- * reentrants, spurs — plus stream bends/junctions from OSM hydrography.
- * These become candidate control points for course generation.
+ * Point features: hilltops (local maxima with all-directions relief),
+ * saddles (ring test), stream bends/junctions from OSM hydrography.
  *
- * Methods (all standard terrain analysis):
- *  - smooth DEM (binomial 3x3, two passes) to kill sensor noise
- *  - hilltops: strict local maxima with enough relief over a ~60 m ring
- *  - saddles: 16-point ring test (elevation profile crosses the center
- *    level exactly 4 times → two ridges + two valleys meet)
- *  - reentrants/gullies: D8 flow accumulation — concave slices of slope
- *    collect water; modest accumulation + real slope = a reentrant
- *  - spurs/ridges: the same on the inverted DEM
+ * Linear features — the navigator's bread and butter:
+ *   reentrant axes: traced down the drainage flow field (water finds the
+ *     middle of a reentrant by definition), then VALIDATED by elevation
+ *     cross-sections — the ground must rise on both sides along the line.
+ *   spur axes: the same trace on the inverted DEM follows crests; the
+ *     cross-section check requires ground falling away on both sides.
+ *
+ * Only axes that survive the cross-section gate are kept, with honest
+ * credentials: median depth (ft) and length (m).
  */
 
 export function extractFeatures(gridInfo, opts) {
@@ -19,8 +19,8 @@ export function extractFeatures(gridInfo, opts) {
   const { cellM, toMap, boundaryFlat, streams, trailPts, caps = {} } = opts;
   const cellFt = cellM * 3.28084;
 
-  /* ---- smooth ---- */
-  const S = smooth3(smooth3(grid, W, H), W, H);
+  /* ---- smooth (3 passes — the DEM has interpolation noise) ---- */
+  const S = smooth3(smooth3(smooth3(grid, W, H), W, H), W, H);
 
   /* ---- slope (degrees) ---- */
   const slope = new Float32Array(W * H);
@@ -33,95 +33,81 @@ export function extractFeatures(gridInfo, opts) {
     }
   }
 
-  /* ---- D8 flow accumulation (and inverted, for ridges) ---- */
-  const accum = flowAccum(S, W, H, false);
-  const ridge = flowAccum(S, W, H, true);
+  /* ---- D8 flow fields + accumulation (downhill and inverted) ---- */
+  const orderDesc = new Uint32Array(W * H);
+  for (let i = 0; i < W * H; i++) orderDesc[i] = i;
+  orderDesc.sort((a, b) => S[b] - S[a]);
+  const dirDown = flowField(S, W, H, false);
+  const dirUp = flowField(S, W, H, true);
+  const accum = accumulate(orderDesc, dirDown, false);
+  const ridge = accumulate(orderDesc, dirUp, true);
 
-  /* ---- hilltops ---- */
+  /* ---- hilltops: must stand well proud of a ~100 m ring ---- */
   const hills = [];
-  const RING = ringOffsets(15); // ~60 m
-  for (let y = 16; y < H - 16; y++) {
-    cell: for (let x = 16; x < W - 16; x++) {
+  const RING = ringOffsets(25); // ~100 m
+  for (let y = 26; y < H - 26; y++) {
+    cell: for (let x = 26; x < W - 26; x++) {
       const i = y * W + x, v = S[i];
       for (let dy = -4; dy <= 4; dy++)
         for (let dx = -4; dx <= 4; dx++) {
           if (!dx && !dy) continue;
           if (S[i + dy * W + dx] >= v) continue cell;
         }
-      let minRing = Infinity;
-      for (const [ox, oy] of RING) minRing = Math.min(minRing, S[i + oy * W + ox]);
-      const relief = v - minRing;
-      if (relief >= 8) hills.push({ x, y, q: relief });
+      let maxRing = -Infinity;
+      for (const [ox, oy] of RING) maxRing = Math.max(maxRing, S[i + oy * W + ox]);
+      const relief = v - maxRing; // EVERY direction must drop, not just one
+      if (relief >= 18) hills.push({ x, y, q: relief });
     }
   }
 
   /* ---- saddles ---- */
   const saddles = [];
-  const SR = ringOffsets(3, 16);
-  for (let y = 4; y < H - 4; y++) {
-    for (let x = 4; x < W - 4; x++) {
+  const SR = ringOffsets(8, 24); // ~32 m ring: real saddles, not dips
+  for (let y = 9; y < H - 9; y++) {
+    for (let x = 9; x < W - 9; x++) {
       const i = y * W + x, v = S[i];
       let trans = 0, prev = 0, ampUp = 0, ampDn = 0;
-      let first = 0;
       for (let k = 0; k <= SR.length; k++) {
         const [ox, oy] = SR[k % SR.length];
         const d = S[i + oy * W + ox] - v;
         if (d > 0) ampUp = Math.max(ampUp, d);
         else ampDn = Math.max(ampDn, -d);
         const sgn = Math.abs(d) < 0.5 ? prev : Math.sign(d);
-        if (k === 0) first = sgn;
-        else if (sgn !== prev && sgn !== 0 && prev !== 0) trans++;
+        if (k > 0 && sgn !== prev && sgn !== 0 && prev !== 0) trans++;
         prev = sgn || prev;
       }
-      void first;
-      if (trans === 4 && Math.min(ampUp, ampDn) >= 5) {
+      if (trans === 4 && Math.min(ampUp, ampDn) >= 13) {
         saddles.push({ x, y, q: Math.min(ampUp, ampDn) });
       }
     }
   }
 
-  /* ---- reentrants (gully cells) & spurs (ridge cells) ---- */
-  const reentrants = [], spurs = [];
-  for (let y = 2; y < H - 2; y++) {
-    for (let x = 2; x < W - 2; x++) {
-      const i = y * W + x;
-      if (slope[i] < 4) continue;
-      if (accum[i] >= 25 && accum[i] <= 5000) {
-        reentrants.push({ x, y, q: slope[i] * Math.log2(accum[i]) });
-      }
-      if (ridge[i] >= 25 && ridge[i] <= 5000) {
-        spurs.push({ x, y, q: slope[i] * Math.log2(ridge[i]) });
-      }
-    }
-  }
-
-  /* ---- greedy spacing selection, strongest first ---- */
-  const SPACING = 15; // cells ≈ 60 m
-  const pick = (cands, cap, spacing = SPACING) => {
+  const pickPts = (cands, cap, spacing = 30) => {
     cands.sort((a, b) => b.q - a.q);
     const out = [];
     for (const c of cands) {
       if (out.length >= cap) break;
-      let ok = true;
-      for (const o of out) {
-        if (Math.abs(o.x - c.x) < spacing && Math.abs(o.y - c.y) < spacing) { ok = false; break; }
-      }
-      if (ok) out.push(c);
+      if (out.every((o) => Math.abs(o.x - c.x) >= spacing || Math.abs(o.y - c.y) >= spacing)) out.push(c);
     }
     return out;
   };
+  const hillsP = pickPts(hills, caps.hill ?? 40);
+  const saddlesP = pickPts(saddles, caps.saddle ?? 25);
 
-  const hillsP = pick(hills, caps.hill ?? 150);
-  const saddlesP = pick(saddles, caps.saddle ?? 100);
-  // spurs shouldn't duplicate hilltops/saddles — those already own the spot
-  const taken = hillsP.concat(saddlesP);
-  const farFromTaken = (c) => taken.every((t) => Math.abs(t.x - c.x) >= 12 || Math.abs(t.y - c.y) >= 12);
-  const reentP = pick(reentrants.filter(farFromTaken), caps.reentrant ?? 400);
-  const spursP = pick(spurs.filter(farFromTaken), caps.spur ?? 400);
+  /* ---- reentrant & spur AXES ---- */
+  const axisOpts = { W, H, S, slope, cellM, cellFt };
+  const reentAxes = traceAndValidate({
+    ...axisOpts, dir: dirDown, flow: accum, inverted: false,
+    A1: 100, A2: 8000, slopeMin: 4, depthMin: 10,
+  });
+  const spurAxes = traceAndValidate({
+    ...axisOpts, dir: dirUp, flow: ridge, inverted: true,
+    A1: 100, A2: 8000, slopeMin: 4, depthMin: 10,
+  });
 
-  /* ---- to map coords, filter to park, attach elevation + trail distance ---- */
+  /* ---- to map coords, filter to park, attach metadata ---- */
   const trailIdx = new BucketIndex(trailPts, 64);
-  const finish = (list, t) =>
+  const finishPt = (list, t) =>
     list
       .map((c) => {
         const m = toMap(c.x, c.y);
@@ -134,14 +120,144 @@ export function extractFeatures(gridInfo, opts) {
       })
       .filter((f) => pointInPolyFlat(f.x, f.y, boundaryFlat));
 
-  const features = [
-    ...finish(hillsP, "hill"),
-    ...finish(saddlesP, "saddle"),
-    ...finish(reentP, "reentrant"),
-    ...finish(spursP, "spur"),
+  const finishAxis = (list, t, cap) =>
+    list
+      .sort((a, b) => b.depth * b.lenCells - a.depth * a.lenCells)
+      .map((a) => {
+        const mapPts = a.cells.map(([cx, cy]) => { const m = toMap(cx, cy); return [m.x, m.y]; });
+        const simp = rdp(mapPts, 1.0);
+        const mid = a.cells[Math.floor(a.cells.length / 2)];
+        const mm = toMap(mid[0], mid[1]);
+        return {
+          t, pts: flat(simp),
+          x: Math.round(mm.x * 10) / 10, y: Math.round(mm.y * 10) / 10, // midpoint = control anchor
+          e: Math.round(S[mid[1] * W + mid[0]]),
+          depth: Math.round(a.depth),
+          len: Math.round(a.lenCells * cellM),
+          dT: Math.round(trailIdx.nearest(mm.x, mm.y)),
+        };
+      })
+      .filter((f) => pointInPolyFlat(f.x, f.y, boundaryFlat))
+      .slice(0, cap);
+
+  return [
+    ...finishPt(hillsP, "hill"),
+    ...finishPt(saddlesP, "saddle"),
+    ...finishAxis(reentAxes, "reentrant", caps.reentrant ?? 130),
+    ...finishAxis(spurAxes, "spur", caps.spur ?? 130),
     ...streamFeatures(streams, boundaryFlat, trailIdx, caps),
   ];
-  return features;
+}
+
+/* ---------------- axis tracing + cross-section validation ---------------- */
+
+function traceAndValidate({ W, H, S, slope, cellM, dir, flow, inverted, A1, A2, slopeMin, depthMin }) {
+  // mask: cells that look like axis material
+  const mask = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) {
+    if (flow[i] >= A1 && flow[i] <= A2 && slope[i] >= slopeMin) mask[i] = 1;
+  }
+  // heads: masked cells nothing masked flows into
+  const hasParent = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) {
+    if (mask[i] && dir[i] >= 0 && mask[dir[i]]) hasParent[dir[i]] = 1;
+  }
+  const claimed = new Int32Array(W * H);
+  const paths = [];
+  for (let i = 0; i < W * H; i++) {
+    if (!mask[i] || hasParent[i] || claimed[i]) continue;
+    const path = [];
+    let cur = i, id = paths.length + 1;
+    while (cur >= 0 && mask[cur] && !claimed[cur] && path.length < 4000) {
+      claimed[cur] = id;
+      path.push(cur);
+      cur = dir[cur];
+    }
+    if (cur >= 0 && claimed[cur] && claimed[cur] !== id) path.push(cur); // join the junction
+    if (path.length >= 12) paths.push(path);
+  }
+
+  /* cross-section gate: ground must rise (reentrant) / fall (spur)
+   * on BOTH sides, at stations along the line */
+  const out = [];
+  for (const path of paths) {
+    const pts = path.map((i) => [i % W, (i / W) | 0]);
+    const stations = [];
+    for (let s = 3; s < pts.length - 3; s += 3) {
+      const [tx, ty] = [pts[s + 3][0] - pts[s - 3][0], pts[s + 3][1] - pts[s - 3][1]];
+      const tl = Math.hypot(tx, ty) || 1;
+      const [nx, ny] = [-ty / tl, tx / tl];
+      const c = S[pts[s][1] * W + pts[s][0]];
+      const side = (sign) => {
+        let extreme = inverted ? Infinity : -Infinity;
+        for (const off of [6, 12]) { // ~25 m and ~50 m out
+          const sx = Math.round(pts[s][0] + nx * off * sign);
+          const sy = Math.round(pts[s][1] + ny * off * sign);
+          if (sx < 0 || sx >= W || sy < 0 || sy >= H) return null;
+          const v = S[sy * W + sx];
+          extreme = inverted ? Math.min(extreme, v) : Math.max(extreme, v);
+        }
+        return extreme;
+      };
+      const L = side(1), R = side(-1);
+      if (L === null || R === null) { stations.push({ s, depth: -1 }); continue; }
+      // reentrant: both sides higher; spur: both sides lower
+      const depth = inverted ? Math.min(c - L, c - R) : Math.min(L - c, R - c);
+      stations.push({ s, depth });
+    }
+    // trim shallow ends, then judge what's left
+    let a = 0, b = stations.length - 1;
+    while (a <= b && stations[a].depth < depthMin) a++;
+    while (b >= a && stations[b].depth < depthMin) b--;
+    if (b - a < 3) continue; // too short after trim
+    const kept = stations.slice(a, b + 1);
+    const passing = kept.filter((st) => st.depth >= depthMin);
+    if (passing.length / kept.length < 0.6) continue;
+    const depths = passing.map((st) => st.depth).sort((x, y) => x - y);
+    const median = depths[(depths.length / 2) | 0];
+    const cells = pts.slice(stations[a].s, stations[b].s + 1);
+    if (cells.length * cellM < 70) continue; // under ~70 m isn't a feature, it's a dent
+    out.push({ cells, depth: median, lenCells: cells.length });
+  }
+  return out;
+}
+
+/* ---------------- flow helpers ---------------- */
+
+const NB = (W) => [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
+const NBD = [Math.SQRT2, 1, Math.SQRT2, 1, 1, Math.SQRT2, 1, Math.SQRT2];
+
+function flowField(S, W, H, inverted) {
+  const dir = new Int32Array(W * H).fill(-1);
+  const nb = NB(W);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      let best = -1, bestDrop = 0;
+      for (let k = 0; k < 8; k++) {
+        const drop = (inverted ? S[i + nb[k]] - S[i] : S[i] - S[i + nb[k]]) / NBD[k];
+        if (drop > bestDrop) { bestDrop = drop; best = i + nb[k]; }
+      }
+      dir[i] = best;
+    }
+  }
+  return dir;
+}
+
+function accumulate(orderDesc, dir, reverse) {
+  const accum = new Float32Array(dir.length).fill(1);
+  if (reverse) {
+    for (let k = orderDesc.length - 1; k >= 0; k--) {
+      const i = orderDesc[k];
+      if (dir[i] >= 0) accum[dir[i]] += accum[i];
+    }
+  } else {
+    for (let k = 0; k < orderDesc.length; k++) {
+      const i = orderDesc[k];
+      if (dir[i] >= 0) accum[dir[i]] += accum[i];
+    }
+  }
+  return accum;
 }
 
 /* ---------------- stream bends & junctions (map coords) ---------------- */
@@ -165,7 +281,7 @@ function streamFeatures(streams, boundaryFlat, trailIdx, caps) {
       const a2 = Math.atan2(s[i + 5] - s[i + 1], s[i + 4] - s[i]);
       let turn = Math.abs(a2 - a1) * (180 / Math.PI);
       if (turn > 180) turn = 360 - turn;
-      if (turn >= 55) bends.push({ t: "streambend", x: s[i], y: s[i + 1], q: turn });
+      if (turn >= 70) bends.push({ t: "streambend", x: s[i], y: s[i + 1], q: turn });
     }
   }
   bends.sort((a, b) => b.q - a.q);
@@ -184,45 +300,23 @@ function streamFeatures(streams, boundaryFlat, trailIdx, caps) {
     }));
 }
 
-/* ---------------- helpers ---------------- */
+/* ---------------- generic helpers ---------------- */
 
 function smooth3(src, W, H) {
   const out = new Float32Array(W * H);
   out.set(src);
-  const K = [1, 2, 1];
   const tmp = new Float32Array(W * H);
   for (let y = 0; y < H; y++)
     for (let x = 1; x < W - 1; x++) {
       const i = y * W + x;
-      tmp[i] = (src[i - 1] * K[0] + src[i] * K[1] + src[i + 1] * K[2]) / 4;
+      tmp[i] = (src[i - 1] + src[i] * 2 + src[i + 1]) / 4;
     }
   for (let y = 1; y < H - 1; y++)
     for (let x = 1; x < W - 1; x++) {
       const i = y * W + x;
-      out[i] = (tmp[i - W] * K[0] + tmp[i] * K[1] + tmp[i + W] * K[2]) / 4;
+      out[i] = (tmp[i - W] + tmp[i] * 2 + tmp[i + W]) / 4;
     }
   return out;
-}
-
-function flowAccum(S, W, H, inverted) {
-  const n = W * H;
-  const order = new Uint32Array(n);
-  for (let i = 0; i < n; i++) order[i] = i;
-  const sorted = Array.from(order).sort((a, b) => (inverted ? S[a] - S[b] : S[b] - S[a]));
-  const accum = new Float32Array(n).fill(1);
-  const NB = [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
-  const DIST = [Math.SQRT2, 1, Math.SQRT2, 1, 1, Math.SQRT2, 1, Math.SQRT2];
-  for (const i of sorted) {
-    const x = i % W, y = (i / W) | 0;
-    if (x < 1 || x >= W - 1 || y < 1 || y >= H - 1) continue;
-    let best = -1, bestDrop = 0;
-    for (let k = 0; k < 8; k++) {
-      const drop = (inverted ? S[i + NB[k]] - S[i] : S[i] - S[i + NB[k]]) / DIST[k];
-      if (drop > bestDrop) { bestDrop = drop; best = i + NB[k]; }
-    }
-    if (best >= 0) accum[best] += accum[i];
-  }
-  return accum;
 }
 
 function ringOffsets(r, count = Math.max(16, Math.round(r * 4))) {
@@ -233,6 +327,22 @@ function ringOffsets(r, count = Math.max(16, Math.round(r * 4))) {
   }
   return out;
 }
+
+function rdp(pts, eps) {
+  if (pts.length <= 2) return pts;
+  const [ax, ay] = pts[0], [bx, by] = pts[pts.length - 1];
+  let iMax = 0, dMax = 0;
+  const dx = bx - ax, dy = by - ay;
+  const len = Math.hypot(dx, dy) || 1e-9;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = Math.abs((pts[i][0] - ax) * dy - (pts[i][1] - ay) * dx) / len;
+    if (d > dMax) { dMax = d; iMax = i; }
+  }
+  if (dMax <= eps) return [pts[0], pts[pts.length - 1]];
+  return rdp(pts.slice(0, iMax + 1), eps).slice(0, -1).concat(rdp(pts.slice(iMax), eps));
+}
+
+const flat = (pts) => pts.flatMap(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
 
 function pointInPolyFlat(x, y, poly) {
   let inside = false;
