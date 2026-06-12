@@ -43,6 +43,10 @@ function pickPark(parkId) {
   state.candidates = [];
   state.map = new ParkMap($("#map"), state.park);
   state.map.onTap = onMapTap;
+  // debug: ?features shows detected terrain features (course-gen candidates)
+  if (new URLSearchParams(location.search).has("features")) {
+    state.map.showFeatures(state.park.features || []);
+  }
   $("#park-select").value = parkId;
   renderPanel();
   setBanner(`Welcome to ${state.park.name}. Tap the trailhead where you parked to begin.`);
@@ -76,7 +80,6 @@ function setCar(nodeId) {
   state.carId = nodeId;
   state.pos = { x: park.nodes[nodeId].x, y: park.nodes[nodeId].y };
   state.recentNodes = [nodeId];
-  state.map.setCar(park.nodes[nodeId]);
   updateYou();
   renderPanel();
   setBanner(`Car parked at ${park.nodes[nodeId].name}. ${state.mode === "demo" ? "Tap anywhere on a trail to start walking (demo)." : "Start hiking — I'm watching the trail."}`);

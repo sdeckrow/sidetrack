@@ -18,10 +18,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodePNG } from "./png.mjs";
+import { extractFeatures } from "./terrain.mjs";
 import { TAGS, PARK_CONTENT } from "./park-content.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const Z = 14;
+const Z = 15;
 const TILE = 256;
 const MAP_W = 1000;
 
@@ -118,11 +119,10 @@ const flat = (pts) => pts.flatMap(([x, y]) => [Math.round(x * 10) / 10, Math.rou
 
 /* ---------------- contours (marching squares) ---------------- */
 
-function buildContours(dem, bbox, project, intervalFt, indexEvery) {
+function buildGrid(dem, bbox) {
   const px0 = Math.floor(lng2px(bbox.lngMin)), px1 = Math.ceil(lng2px(bbox.lngMax));
   const py0 = Math.floor(lat2px(bbox.latMax)), py1 = Math.ceil(lat2px(bbox.latMin));
   const W = px1 - px0, H = py1 - py0;
-
   const grid = new Float32Array(W * H);
   let lo = Infinity, hi = -Infinity;
   for (let y = 0; y < H; y++)
@@ -132,6 +132,11 @@ function buildContours(dem, bbox, project, intervalFt, indexEvery) {
       if (e < lo) lo = e;
       if (e > hi) hi = e;
     }
+  return { grid, W, H, px0, py0, lo, hi };
+}
+
+function buildContours(gridInfo, project, intervalFt, indexEvery) {
+  const { grid, W, H, px0, py0, lo, hi } = gridInfo;
 
   const levels = [];
   for (let l = Math.ceil(lo / intervalFt) * intervalFt; l < hi; l += intervalFt) levels.push(l);
@@ -200,7 +205,8 @@ function buildContours(dem, bbox, project, intervalFt, indexEvery) {
       });
       pts = rdp(chaikin(pts), 0.9);
       if (pts.length < 3) continue;
-      (level % (intervalFt * indexEvery) === 0 ? index : minor).push(flat(pts));
+      if (level % (intervalFt * indexEvery) === 0) index.push({ e: level, pts: flat(pts) });
+      else minor.push(flat(pts));
     }
   }
   return { minor, index, levels: levels.length, lo: Math.round(lo), hi: Math.round(hi) };
@@ -374,7 +380,8 @@ for (const parkId of ["redmountain", "oakmountain"]) {
   for (let x = tx0; x <= tx1; x++) for (let y = ty0; y <= ty1; y++) await dem.load(x, y);
 
   const interval = parkId === "oakmountain" ? 40 : 20;
-  const contours = buildContours(dem, bbox, project, interval, 5);
+  const gridInfo = buildGrid(dem, bbox);
+  const contours = buildContours(gridInfo, project, interval, 5);
   console.log(`contours: ${contours.minor.length} minor + ${contours.index.length} index (${contours.lo}–${contours.hi} ft, ${interval} ft interval)`);
 
   const { nodes, edges } = buildGraph(raw.elements, raw.boundary.geometry, dem, project);
@@ -433,6 +440,19 @@ for (const parkId of ["redmountain", "oakmountain"]) {
   const scrub = els.filter((e) => e.tags.natural === "scrub" && inPark(e.geometry))
     .map((e) => ({ fill: "green", pts: polyOf(e) }));
   const boundary = polyOf(raw.boundary);
+
+  /* terrain features: candidate control points for course generation */
+  const cellM = (156543.03392 * Math.cos(midLat)) / 2 ** Z;
+  const features = extractFeatures(gridInfo, {
+    cellM,
+    toMap: (cx, cy) => project(px2lat(gridInfo.py0 + cy + 0.5), px2lng(gridInfo.px0 + cx + 0.5)),
+    boundaryFlat: boundary,
+    streams,
+    trailPts: edges.flatMap((e) => e.pts),
+  });
+  const fCounts = {};
+  for (const f of features) fCounts[f.t] = (fCounts[f.t] || 0) + 1;
+  console.log(`features: ${features.length}`, fCounts);
 
   /* POIs: resolve anchors to real coords + nearest graph node */
   const adjEdges = edges;
@@ -498,7 +518,7 @@ for (const parkId of ["redmountain", "oakmountain"]) {
     contourInterval: interval,
     boundary, contours: { minor: contours.minor, index: contours.index },
     water, streams, dams, roads, veg: veg.concat(scrub), parkingLots,
-    nodes, edges, pois, labels, lakeLabels,
+    nodes, edges, pois, labels, lakeLabels, features,
   };
 }
 

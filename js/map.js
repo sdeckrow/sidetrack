@@ -1,8 +1,9 @@
-/* Sidetrack — orienteering map renderer (SVG).
+/* Sidetrack — topographic map renderer (SVG).
  *
- * Draws real survey data (OSM trails/water, USGS contours) in ISOM-ish
- * orienteering colors: white runnable forest, yellow open land, brown
- * contours, blue water, black paths, purple course overlay.
+ * Draws real survey data (OSM trails/water, USGS contours) in classic
+ * USGS topo style: green woodland tint, white open land, brown contours
+ * with elevation labels, blue water, black dashed trails, red major
+ * roads — with an orienteering-purple course overlay on top.
  */
 
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -22,18 +23,19 @@ function flatPath(pts, close = false) {
 }
 
 const COLORS = {
-  paper: "#fffdf6",
-  contour: "#c4824d",
-  contourIndex: "#a96b38",
-  water: "#aadcf0",
-  waterEdge: "#3d87ad",
-  stream: "#3d87ad",
-  openLand: "#ffe896",
-  scrub: "#b7d9a8",
-  roadMajor: "#444444",
-  roadMinor: "#8d8d8d",
-  trail: "#1a1a1a",
-  boundary: "#7a4dbf",
+  paper: "#fbfbf7",
+  woodland: "#d3e5bc",   // USGS green tint: forested
+  openLand: "#fbfbf7",   // white: clearings, fields
+  contour: "#bc7e3c",
+  contourIndex: "#9c5f22",
+  water: "#b9d8ef",
+  waterEdge: "#2a76b0",
+  stream: "#2a76b0",
+  grid: "#9bb4cc",
+  roadMajor: "#d44a36",
+  roadMinor: "#3c3c3c",
+  trail: "#111111",
+  boundary: "#444444",
   course: "#a626a6",
 };
 
@@ -79,27 +81,22 @@ class ParkMap {
     this.youDot = el("g", { class: "you", visibility: "hidden" }, this.gLive);
     el("circle", { r: 14, class: "you-pulse" }, this.youDot);
     el("circle", { r: 6, class: "you-core" }, this.youDot);
-    // car marker
-    this.carMark = el("text", { class: "car-mark", visibility: "hidden", "text-anchor": "middle" }, this.gLive);
-    this.carMark.textContent = "🚗";
   }
 
   _drawTerrain() {
     const p = this.park;
-    // open land / scrub
+    // USGS woodland tint over the park, white for open land
+    el("path", { d: flatPath(p.boundary, true), fill: COLORS.woodland }, this.gVeg);
     for (const v of p.veg) {
-      el("path", {
-        d: flatPath(v.pts, true),
-        fill: v.fill === "green" ? COLORS.scrub : COLORS.openLand,
-        opacity: 0.8,
-      }, this.gVeg);
+      el("path", { d: flatPath(v.pts, true), fill: COLORS.openLand }, this.gVeg);
     }
-    // real contours from USGS elevation
+    // real contours from USGS elevation; index contours get elevation labels
     for (const c of p.contours.minor) {
-      el("path", { d: flatPath(c), fill: "none", stroke: COLORS.contour, "stroke-width": 0.7, opacity: 0.9 }, this.gContours);
+      el("path", { d: flatPath(c), fill: "none", stroke: COLORS.contour, "stroke-width": 0.55, opacity: 0.85 }, this.gContours);
     }
     for (const c of p.contours.index) {
-      el("path", { d: flatPath(c), fill: "none", stroke: COLORS.contourIndex, "stroke-width": 1.5, opacity: 0.95 }, this.gContours);
+      el("path", { d: flatPath(c.pts), fill: "none", stroke: COLORS.contourIndex, "stroke-width": 1.2, opacity: 0.95 }, this.gContours);
+      this._contourLabel(c);
     }
     // lakes & streams
     for (const w of p.water) {
@@ -121,32 +118,56 @@ class ParkMap {
     }
     // parking lots
     for (const lot of this.park.parkingLots) {
-      el("path", { d: flatPath(lot.pts, true), fill: "#d9d4c8", stroke: "#9b958a", "stroke-width": 0.8 }, this.gRoads);
+      el("path", { d: flatPath(lot.pts, true), fill: "#dcdcd6", stroke: "#8e8e88", "stroke-width": 0.7 }, this.gRoads);
     }
+    // light reference grid, half-mile spacing (topo-map furniture)
+    const step = this.park.pxPerMile / 2;
+    for (let x = step; x < this.W; x += step) {
+      el("line", { x1: x, y1: 0, x2: x, y2: this.H, stroke: COLORS.grid, "stroke-width": 0.4, opacity: 0.4 }, this.gVeg);
+    }
+    for (let y = step; y < this.H; y += step) {
+      el("line", { x1: 0, y1: y, x2: this.W, y2: y, stroke: COLORS.grid, "stroke-width": 0.4, opacity: 0.4 }, this.gVeg);
+    }
+  }
+
+  /* elevation label nestled along an index contour, USGS-style */
+  _contourLabel(c) {
+    const pts = c.pts;
+    if (pts.length < 40) return; // short scrap — no label
+    const mid = Math.floor(pts.length / 4) * 2;
+    const x1 = pts[mid - 2], y1 = pts[mid - 1], x2 = pts[mid + 2], y2 = pts[mid + 3];
+    if (x2 === undefined) return;
+    let rot = (Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI;
+    if (rot > 90) rot -= 180;
+    if (rot < -90) rot += 180;
+    const t = el("text", {
+      x: pts[mid], y: pts[mid + 1] + 2,
+      transform: `rotate(${rot} ${pts[mid]} ${pts[mid + 1]})`,
+      class: "contour-label", "text-anchor": "middle",
+    }, this.gContours);
+    t.textContent = c.e;
   }
 
   _drawTrails() {
     const p = this.park;
     for (const e of p.edges) {
-      // ISOM-style: solid for tracks, dashes shorten as the path gets fainter
-      const dash = e.nav >= 3 ? "3 5" : e.nav === 2 ? "8 4" : null;
-      const attrs = {
+      // USGS-style: trails are dashed black; dashes shorten as the path gets fainter
+      const dash = e.nav >= 3 ? "2.5 3.5" : e.nav === 2 ? "6 3" : "11 3";
+      el("path", {
         d: flatPath(e.pts), fill: "none",
-        stroke: COLORS.trail, "stroke-width": e.nav >= 3 ? 1.3 : 1.8,
-        "stroke-linecap": "round", class: "trail-edge",
-      };
-      if (dash) attrs["stroke-dasharray"] = dash;
-      el("path", attrs, this.gTrails);
+        stroke: COLORS.trail, "stroke-width": e.nav >= 3 ? 1.1 : 1.5,
+        "stroke-dasharray": dash, "stroke-linecap": "butt", class: "trail-edge",
+      }, this.gTrails);
     }
     // junction dots + parking squares
     for (const [, n] of Object.entries(p.nodes)) {
       if (n.parking) {
         const g = el("g", { transform: `translate(${n.x},${n.y})` }, this.gTrails);
-        el("rect", { x: -10, y: -10, width: 20, height: 20, rx: 3, fill: "#fff", stroke: "#1a1a1a", "stroke-width": 1.8 }, g);
-        const t = el("text", { "text-anchor": "middle", y: 5.5, class: "parking-p" }, g);
+        el("rect", { x: -9, y: -9, width: 18, height: 18, rx: 2, fill: "#fff", stroke: "#111", "stroke-width": 1.5 }, g);
+        const t = el("text", { "text-anchor": "middle", y: 5, class: "parking-p" }, g);
         t.textContent = "P";
       } else {
-        el("circle", { cx: n.x, cy: n.y, r: 1.7, fill: COLORS.trail, opacity: 0.85 }, this.gTrails);
+        el("circle", { cx: n.x, cy: n.y, r: 1.3, fill: COLORS.trail, opacity: 0.6 }, this.gTrails);
       }
     }
   }
@@ -161,26 +182,21 @@ class ParkMap {
     }, this.gBoundary);
     el("path", {
       d: flatPath(p.boundary, true), fill: "none",
-      stroke: COLORS.boundary, "stroke-width": 1.6, "stroke-dasharray": "10 4 2 4", opacity: 0.8,
+      stroke: COLORS.boundary, "stroke-width": 1.3, "stroke-dasharray": "12 4 3 4", opacity: 0.9,
     }, this.gBoundary);
   }
 
   _drawLabels() {
-    for (const l of this.park.labels) {
-      const t = el("text", {
-        x: l.x, y: l.y - 4, transform: `rotate(${l.rot} ${l.x} ${l.y})`,
-        class: "trail-label", "text-anchor": "middle",
-      }, this.gLabels);
-      t.textContent = l.text;
-    }
     for (const l of this.park.lakeLabels || []) {
       const t = el("text", { x: l.x, y: l.y, class: "lake-label", "text-anchor": "middle" }, this.gLabels);
       t.textContent = l.text;
     }
-    const title = el("text", { x: 22, y: 38, class: "map-title" }, this.gLabels);
-    title.textContent = this.park.name;
-    const sub = el("text", { x: 22, y: 58, class: "map-sub" }, this.gLabels);
-    sub.textContent = this.park.tagline;
+    // quad-style title block: small caps, top left, on a white tab
+    const tb = el("g", {}, this.gLabels);
+    const title = el("text", { x: 22, y: 34, class: "map-title" }, tb);
+    title.textContent = this.park.name.toUpperCase();
+    const w = this.park.name.length * 11 + 24;
+    tb.insertBefore(el("rect", { x: 12, y: 14, width: w, height: 30, fill: "#fbfbf7", opacity: 0.85 }), title);
   }
 
   _drawFurniture() {
@@ -193,7 +209,7 @@ class ParkMap {
     // scale bar: one real mile, quarter ticks
     const mi = this.park.pxPerMile;
     const sb = el("g", { transform: `translate(22, ${H - 26})`, class: "scale-bar" }, this.gLabels);
-    el("rect", { x: -8, y: -14, width: mi + 60, height: 30, fill: "#fffdf6", opacity: 0.75, rx: 4 }, sb);
+    el("rect", { x: -8, y: -14, width: mi + 60, height: 30, fill: COLORS.paper, opacity: 0.8, rx: 2 }, sb);
     el("path", { d: `M 0 0 H ${mi}`, stroke: "#333", "stroke-width": 2 }, sb);
     for (let q = 0; q <= 4; q++) {
       el("path", { d: `M ${(mi * q) / 4} -5 V 5`, stroke: "#333", "stroke-width": q % 4 === 0 ? 2 : 1.2 }, sb);
@@ -202,6 +218,61 @@ class ParkMap {
     st.textContent = "1 mile";
     const ct = el("text", { x: 0, y: -18, class: "scale-text" }, sb);
     ct.textContent = `contours ${this.park.contourInterval} ft`;
+  }
+
+  /* ---- terrain-feature debug overlay ---- */
+
+  showFeatures(features) {
+    if (this.gFeatures) this.gFeatures.remove();
+    this.gFeatures = el("g", {}, this.svg);
+    this.svg.insertBefore(this.gFeatures, this.gCourse);
+    const STYLE = {
+      hill: { color: "#8a4b14", shape: "triangle" },
+      saddle: { color: "#8a4b14", shape: "diamond" },
+      reentrant: { color: "#1d7d35", shape: "circle" },
+      spur: { color: "#d2691e", shape: "circle" },
+      streambend: { color: "#1f6fa8", shape: "circle" },
+      streamjct: { color: "#1f6fa8", shape: "square" },
+    };
+    for (const f of features) {
+      const s = STYLE[f.t];
+      if (!s) continue;
+      const far = f.dT > this.park.pxPerMile * 0.3; // >0.3 mi from any trail
+      const g = el("g", { opacity: far ? 0.3 : 0.9 }, this.gFeatures);
+      const r = 3;
+      if (s.shape === "triangle") {
+        el("path", { d: `M ${f.x} ${f.y - r - 1} L ${f.x + r} ${f.y + r - 1} L ${f.x - r} ${f.y + r - 1} Z`, fill: s.color }, g);
+      } else if (s.shape === "diamond") {
+        el("path", { d: `M ${f.x} ${f.y - r - 1} L ${f.x + r + 1} ${f.y} L ${f.x} ${f.y + r + 1} L ${f.x - r - 1} ${f.y} Z`, fill: "none", stroke: s.color, "stroke-width": 1.4 }, g);
+      } else if (s.shape === "square") {
+        el("rect", { x: f.x - r, y: f.y - r, width: r * 2, height: r * 2, fill: s.color }, g);
+      } else {
+        el("circle", { cx: f.x, cy: f.y, r, fill: "none", stroke: s.color, "stroke-width": 1.5 }, g);
+      }
+      const tip = el("title", {}, g);
+      tip.textContent = `${f.t} · ${f.e} ft · q ${f.q} · ${(f.dT / this.park.pxPerMile).toFixed(2)} mi to trail`;
+    }
+    // legend
+    const lg = el("g", { transform: `translate(${this.W - 168}, ${this.H - 132})` }, this.gFeatures);
+    el("rect", { x: 0, y: 0, width: 156, height: 120, fill: "#fbfbf7", opacity: 0.92, stroke: "#999", "stroke-width": 0.7, rx: 3 }, lg);
+    const rows = [
+      ["hill", "hilltop"], ["saddle", "saddle"], ["reentrant", "reentrant"],
+      ["spur", "spur"], ["streambend", "stream bend"], ["streamjct", "stream junction"],
+    ];
+    rows.forEach(([t, label], i) => {
+      const y = 17 + i * 17;
+      const s = STYLE[t];
+      if (s.shape === "triangle") el("path", { d: `M 14 ${y - 4} L 18 ${y + 3} L 10 ${y + 3} Z`, fill: s.color }, lg);
+      else if (s.shape === "diamond") el("path", { d: `M 14 ${y - 4} L 18 ${y} L 14 ${y + 4} L 10 ${y} Z`, fill: "none", stroke: s.color, "stroke-width": 1.4 }, lg);
+      else if (s.shape === "square") el("rect", { x: 11, y: y - 3, width: 6, height: 6, fill: s.color }, lg);
+      else el("circle", { cx: 14, cy: y, r: 3, fill: "none", stroke: s.color, "stroke-width": 1.5 }, lg);
+      const t2 = el("text", { x: 26, y: y + 3.5, class: "scale-text" }, lg);
+      t2.textContent = label;
+    });
+  }
+
+  hideFeatures() {
+    if (this.gFeatures) { this.gFeatures.remove(); this.gFeatures = null; }
   }
 
   /* ---- course overlay (orienteering purple) ---- */
@@ -266,13 +337,6 @@ class ParkMap {
     if (!pt) { this.youDot.setAttribute("visibility", "hidden"); return; }
     this.youDot.setAttribute("transform", `translate(${pt.x},${pt.y})`);
     this.youDot.setAttribute("visibility", visible ? "visible" : "hidden");
-  }
-
-  setCar(node) {
-    if (!node) { this.carMark.setAttribute("visibility", "hidden"); return; }
-    this.carMark.setAttribute("x", node.x);
-    this.carMark.setAttribute("y", node.y - 16);
-    this.carMark.setAttribute("visibility", "visible");
   }
 
   /* ---- pan / zoom / tap ---- */

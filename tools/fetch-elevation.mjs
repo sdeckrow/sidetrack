@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TILE_DIR = path.join(HERE, "raw", "tiles");
-const Z = 14; // ~9.5 m/px at this latitude — plenty for 10 m contours
+const Z = 15; // ~4 m/px at this latitude — fine enough for terrain-feature detection
 
 const lng2x = (lng, z) => ((lng + 180) / 360) * 2 ** z;
 const lat2y = (lat, z) => {

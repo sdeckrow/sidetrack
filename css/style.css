@@ -101,16 +101,15 @@ select {
   cursor: crosshair;
 }
 
-/* map text (lives inside the SVG) */
-.trail-label { font-family: var(--hand); font-size: 11px; fill: #555; paint-order: stroke; stroke: #fffdf6; stroke-width: 2.5px; }
-.lake-label { font-family: var(--hand); font-size: 12px; font-style: italic; fill: #2a6f93; }
-.scale-text { font-family: var(--hand); font-size: 12px; fill: #333; }
-.map-title { font-family: var(--hand); font-size: 32px; font-weight: 700; fill: var(--brown); }
-.map-sub { font-family: var(--hand); font-size: 17px; fill: #8a7a5e; }
-.north-n { font-family: var(--hand); font-size: 20px; fill: var(--brown); }
-.parking-p { font-family: var(--hand); font-size: 17px; font-weight: 700; fill: var(--ink); }
-.control-num { font-family: var(--hand); font-size: 22px; font-weight: 700; fill: var(--purple); }
-.car-mark { font-size: 18px; }
+/* map text (lives inside the SVG) — topo-map typography */
+.trail-label { font-family: "Helvetica Neue", Arial, sans-serif; font-size: 9.5px; font-style: italic; fill: #222; paint-order: stroke; stroke: #fbfbf7; stroke-width: 2.2px; }
+.lake-label { font-family: Georgia, "Times New Roman", serif; font-size: 12px; font-style: italic; fill: #1f6fa8; paint-order: stroke; stroke: #fbfbf7; stroke-width: 2px; }
+.contour-label { font-family: "Helvetica Neue", Arial, sans-serif; font-size: 8px; fill: #9c5f22; paint-order: stroke; stroke: #fbfbf7; stroke-width: 2px; }
+.scale-text { font-family: "Helvetica Neue", Arial, sans-serif; font-size: 11px; fill: #333; }
+.map-title { font-family: Georgia, "Times New Roman", serif; font-size: 19px; font-weight: 700; letter-spacing: 2px; fill: #222; }
+.north-n { font-family: Georgia, serif; font-size: 17px; fill: #333; }
+.parking-p { font-family: "Helvetica Neue", Arial, sans-serif; font-size: 13px; font-weight: 700; fill: var(--ink); }
+.control-num { font-family: "Helvetica Neue", Arial, sans-serif; font-size: 19px; font-weight: 700; fill: var(--purple); }
 
 .you-core { fill: #d23f2e; stroke: #fff; stroke-width: 2; }
 .you-pulse {
